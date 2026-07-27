@@ -2,151 +2,127 @@
 
 > **Trade memory for time.**
 
-This is the canonical description of why MicroColossus exists, what it is currently building, what has been implemented, and how future claims must be validated.
+This document defines the project, architecture, evidence, competitive rules, and development path.
 
 ## 1. Purpose
 
-MicroColossus is an experimental open-source runtime project for full-parameter training under strict memory constraints.
+MicroColossus explores full-parameter training when the complete training state cannot remain resident in available memory.
 
-The project asks:
+The central question is:
 
-> How can a runtime execute a valid training update when the complete model state cannot remain resident, while the active computation stays inside explicit memory, storage, and endurance budgets?
+> How can a runtime execute a valid update while active computation remains inside explicit memory, storage, time, and endurance budgets?
 
-The current primary platform is an Apple Silicon Mac, beginning with an M2 system with 8 GB of unified memory and local NVMe storage.
+The primary target is Apple Silicon, beginning with a Mac M2 with 8 GB of unified memory and local NVMe storage.
 
-MicroColossus does not promise infinite models, datacenter throughput, or elimination of total training compute. Storage capacity, memory pressure, minimum useful tile size, total floating-point work, SSD bandwidth, SSD endurance, and elapsed time remain physical limits.
+MicroColossus does not promise infinite models, datacenter throughput, or elimination of total compute. Storage capacity, memory pressure, minimum useful tile size, compute, bandwidth, SSD endurance, and elapsed time remain physical constraints.
 
 ## 2. Why the project exists
 
-Training requires more than model weights. A full step may also require:
+Training requires more than model weights. A full step may require:
 
 - parameter gradients;
-- Adam first and second moments;
+- optimizer states;
 - optional master-weight copies;
 - saved activations or recomputation metadata;
 - logits and loss intermediates;
 - temporary tensors and operator workspaces;
-- allocator, framework, driver, and runtime overhead.
+- allocator, framework, driver, and operating-system overhead.
 
-A mixed-precision AdamW layout is often approximated at roughly 16 bytes or more of persistent state per trainable parameter before activations. The exact value depends on dtype, optimizer, implementation, and layout.
+A machine may have enough storage for the complete state but insufficient safe resident memory. MicroColossus treats that mismatch as a scheduling problem whose complete cost must be measured.
 
-| Parameters | Illustrative persistent state at 16 bytes per parameter |
-|---:|---:|
-| 124 million | about 2.0 GB |
-| 350 million | about 5.6 GB |
-| 1 billion | about 16 GB |
-| 7 billion | about 112 GB |
+## 3. Apple Silicon design rules
 
-A small computer may have enough storage for this state while lacking enough resident memory to train it conventionally. MicroColossus treats that mismatch as a scheduling problem whose complete cost must be measured.
+Apple Silicon CPU and GPU workloads share unified physical memory.
 
-## 3. Why Apple M2 changes the design
+### Placement is not capacity offload
 
-Apple Silicon does not expose discrete CPU RAM and GPU VRAM in the same way as a conventional system with a dedicated GPU. CPU and Metal workloads share unified physical memory.
+Moving a tensor from CPU execution to MPS changes placement and execution. It does not create a second physical memory pool. Keeping CPU and accelerator copies can increase pressure on the same memory.
 
-This creates four important rules.
+### Memory counters overlap
 
-### 3.1 Placement is not capacity offload
+Process RSS, framework allocator values, Metal driver allocation, compressed memory, and swap are different views of memory behavior. They must not be added as separate physical pools.
 
-Moving a tensor from CPU execution to the MPS device changes how it is used and represented. It does not create a separate physical memory pool. Keeping a complete CPU copy while materializing an MPS copy can increase pressure on the same unified memory.
-
-### 3.2 Memory counters overlap
-
-Process RSS, MPS current tensor allocation, and Metal driver allocation describe different views of memory. They can overlap. They must not be added to estimate total physical use.
-
-### 3.3 Storage is the capacity tier
-
-NVMe, not CPU memory, is the first tier that can hold state without consuming unified memory. The useful long-term hierarchy is therefore:
+### NVMe is the capacity tier
 
 ```text
-MPS execution and active tensor working set
-                  |
+MPS or MLX execution and active tensor working set
+                         |
 bounded unified-memory staging and runtime state
-                  |
+                         |
 versioned NVMe tensor store
 ```
 
-### 3.4 The first bottleneck may be memory pressure, not transfer bandwidth
+### Memory pressure is a planning input
 
-A schedule must manage the active MPS allocation, Metal driver allocation, process RSS, operating-system pressure, storage traffic, and step time together.
+The planner must consider active allocations, process footprint, macOS pressure, compression, swap, storage traffic, SSD writes, and step time together.
 
 ## 4. Central hypothesis
 
-For a useful class of Transformer models and training recipes, part of resident-memory demand may be exchanged for:
+For a useful class of Transformer models and training recipes, part of resident-memory demand can be exchanged for:
 
 - versioned tensor storage;
-- bounded staging buffers;
+- bounded staging and caches;
 - activation recomputation;
 - layer-wise execution;
 - intra-layer tiling;
 - asynchronous prefetch and writeback;
 - additional elapsed time.
 
-The minimum capacity relationships are:
+Minimum capacity relationships are:
 
 ```text
 model state + checkpoints + metadata <= allocated NVMe capacity
 
 active parameter tiles + activations + workspaces + runtime buffers
-    <= configured logical accelerator working-set budget
+    <= safe accelerator working set
 
 process state + staging + operating overhead
     remains below safe unified-memory pressure
 ```
 
-These relationships are necessary but not sufficient. A viable schedule must also account for SSD bandwidth, write amplification, endurance, MPS operator support, numerical behavior, and recovery after interruption.
+These conditions are necessary but not sufficient. A viable schedule must also satisfy numerical, bandwidth, endurance, recovery, and usefulness constraints.
 
-## 5. Goals and boundaries
+## 5. Goals
 
 MicroColossus aims to:
 
-1. Train models whose complete state cannot remain resident in unified memory.
-2. Keep only the active tensor working set available to MPS execution.
-3. Store inactive parameter and optimizer chunks on NVMe.
-4. Apply explicit logical budgets to MPS allocations, process memory, storage capacity, and cumulative SSD writes.
-5. Recompute selected activations instead of retaining them.
-6. Tile a single operation when it cannot fit as a whole.
-7. Preserve a clearly identified full-parameter reference path.
-8. Track the identity, version, location, and integrity of managed tensor chunks.
-9. Avoid publishing a partially completed optimizer step.
-10. Report time, memory, storage traffic, stalls, and numerical distance from the resident baseline.
+1. train models whose complete state cannot remain safely resident;
+2. keep only the active working set available to accelerator execution;
+3. keep inactive parameter and optimizer chunks on NVMe;
+4. apply explicit memory, storage, write, and time budgets;
+5. recompute selected activations;
+6. tile an operation when it cannot fit as a whole;
+7. preserve a full-parameter reference path;
+8. track identity, version, location, and integrity of managed chunks;
+9. publish optimizer steps atomically;
+10. recover the last committed state after interruption;
+11. report numerical distance, time, memory pressure, storage traffic, and writes.
 
-It does not promise:
+## 6. Boundaries
+
+The project does not claim:
 
 - literally infinite models;
-- throughput comparable with multi-GPU infrastructure;
-- support for arbitrary PyTorch graphs in the initial implementation;
-- feasibility for every model architecture;
-- that CPU-to-MPS movement alone increases capacity;
-- silent CPU fallback for unsupported MPS operators;
-- success at scale targets before measured demonstrations exist.
+- throughput equal to a well-provisioned cluster;
+- support for arbitrary PyTorch or MLX graphs in the initial runtime;
+- feasibility for every architecture;
+- that CPU-to-MPS placement increases capacity;
+- that offloading, checkpointing, quantization, or tiling are new ideas;
+- success at a scale target before a reproducible demonstration.
 
-A larger parameter count alone is not sufficient evidence of success.
-
-## 6. Primary target
-
-The first target class is:
-
-- Apple M2 or a closely related Apple Silicon system;
-- 8 GB of unified memory as the constrained target;
-- macOS and a PyTorch build with MPS support;
-- one internal or external NVMe SSD;
-- no distributed cluster;
-- a controlled decoder-only Transformer;
-- full-parameter reference training before approximate methods.
-
-The implementation remains portable to CPU and CUDA for comparison, but architecture and validation decisions should prioritize MPS and unified memory.
+Parameter count alone is not a sufficient success metric.
 
 ## 7. Training modes
 
-Planned modes remain separate.
+Modes remain separate.
 
 - **`reference`**: all parameters are trainable. No silent adapters, low-rank gradient projections, or quantized optimizer states.
-- **`compact`**: future mode for declared approximations such as quantized optimizer states or low-rank optimizer methods.
-- **`adapter`**: future LoRA or QLoRA path, reported separately from full-parameter training.
+- **`compact`**: future declared approximations such as quantized optimizer state or low-rank optimizer methods.
+- **`adapter`**: future LoRA or QLoRA path, reported separately from full-parameter execution.
 
-Only `reference` is currently accepted.
+Only `reference` is currently implemented.
 
-## 8. Proposed architecture
+## 8. Architecture
 
 ```text
 Dataset stream
@@ -161,7 +137,7 @@ Execution schedule
       |
 +----------------------------------+
 | Runtime                          |
-| - MPS executor                   |
+| - backend executor               |
 | - storage transfer engine        |
 | - activation manager             |
 | - optimizer engine               |
@@ -169,301 +145,219 @@ Execution schedule
 | - telemetry                      |
 +----------------------------------+
       |
-bounded unified-memory working set <-> NVMe tensor store
+bounded unified-memory working set <-> versioned NVMe tensor store
 ```
 
 The intended components are:
 
-- a controlled frontend with a deliberately small operator set;
-- a tensor manifest with shape, dtype, version, location, and checksum;
-- a planner for tiling, prefetch, eviction, recomputation, and placement;
-- bounded staging and MPS working-set policies;
-- a chunked, versioned, recoverable NVMe tensor store;
+- a controlled frontend with a small validated operator set;
+- a backend-neutral tensor manifest;
+- a planner for placement, tiling, prefetch, eviction, and recomputation;
+- bounded staging and accelerator working-set policies;
+- a chunked, versioned, recoverable tensor store;
 - layer-wise and tile-wise forward, backward, and optimizer execution;
-- telemetry for process memory, MPS allocations, storage traffic, stalls, throughput, and writes.
+- telemetry for memory, pressure, storage traffic, stalls, throughput, and writes.
 
 ## 9. Current implementation
-
-The repository contains the executable foundation, not the out-of-core runtime.
 
 Implemented:
 
 - typed YAML configuration;
 - controlled decoder-only Transformer;
-- deterministic synthetic next-token data;
+- deterministic synthetic training data;
 - resident full-parameter AdamW training;
-- explicit `mps` device selection;
-- `auto` device selection that prefers MPS when available;
-- environment inspection through `microcolossus doctor`;
-- process RSS telemetry;
-- CUDA peak-allocation telemetry;
-- MPS current tensor allocation telemetry;
-- MPS driver allocation telemetry;
-- MPS recommended maximum working-set telemetry;
-- NumPy-independent model-state checksums;
-- atomic JSON and JSONL experiment artifacts;
-- a static memory estimator with unified-memory warnings;
-- unit tests, packaging, and CI.
+- CPU, MPS, CUDA, and automatic device selection;
+- real MPS diagnostics and synchronized telemetry;
+- NumPy-independent training checksums;
+- static memory estimation with unified-memory warnings;
+- atomic JSON and JSONL run artifacts;
+- a backend-neutral competitive benchmark schema;
+- portable identical benchmark weights and batches;
+- synchronized PyTorch resident benchmark;
+- PyTorch activation-checkpointing benchmark;
+- an optional equivalent MLX resident implementation;
+- benchmark comparison JSON;
+- tests, linting, type checking, compilation, and CI smoke runs.
 
 Not implemented:
 
 - storage-backed model or optimizer state;
-- real NVMe-to-MPS tensor streaming;
-- activation offloading or managed recomputation;
-- asynchronous transfers;
-- strict runtime budget enforcement;
+- NVMe-to-accelerator execution;
+- runtime-managed activation recomputation;
+- asynchronous storage overlap;
+- hard runtime budget enforcement;
 - intra-layer tiling;
-- tensor manifests, journals, or crash recovery;
-- resident-versus-streamed numerical comparison;
-- training state larger than resident unified memory.
+- tensor journal and crash recovery;
+- training state larger than safe resident unified memory.
 
-The CPU path has been exercised after the first diagnostic corrections. The MPS path has not yet been verified on a real Mac M2 by the maintainer environment.
+## 10. Verified evidence
 
-## 10. Current commands
+A clean independent run on commit `a56fc514f2f8e705654034f3c2f02e3a441c61f3` passed on a MacBook Air M2 with 8 GB of unified memory.
 
-```bash
-microcolossus doctor
-microcolossus plan --config examples/tiny-mps.yaml
-microcolossus train --config examples/tiny-mps.yaml
-microcolossus train --config examples/tiny-resident.yaml --device cpu
-```
+The clean pass included:
 
-A training run writes:
+- native arm64 execution;
+- Ruff, pytest, compileall, and mypy;
+- 21 tests;
+- MPS preflight;
+- explicit MPS training;
+- automatic MPS selection;
+- a larger resident smoke run;
+- CPU-versus-MPS comparison;
+- fixed-batch learning from `5.566842079162598` to `0.4145740866661072`;
+- no detected fallback, unsupported operator, non-finite value, or MPS OOM;
+- a clean source tree before and after the run.
 
-```text
-runs/<experiment>/
-  resolved-config.json
-  memory-plan.json
-  steps.jsonl
-  summary.json
-```
+MPS was not bitwise reproducible by final checksum. Numerical reproducibility must therefore be evaluated with tensor-level tolerances and trajectories.
 
-The workload is synthetic. It validates infrastructure, execution, and repeatability. It does not validate model quality.
+This evidence validates only the resident scope. It does not validate out-of-core execution.
 
-## 11. MPS telemetry contract
+## 11. Competitive engineering policy
 
-Every synchronized MPS training step should report:
+MicroColossus must be competitive by measurement.
 
+The initial direct Apple Silicon baseline set is:
+
+1. resident PyTorch MPS;
+2. PyTorch MPS with activation checkpointing;
+3. native uncompiled MLX with an equivalent controlled Transformer;
+4. compiled MLX as an optimized variant;
+5. MLX-LM full-model fine-tuning when semantically comparable;
+6. MicroColossus reference execution;
+7. compact and adapter modes, reported separately.
+
+Systems that cannot run directly on Apple MPS remain architectural references.
+
+An apples-to-apples comparison should hold constant:
+
+- architecture and unique parameter count;
+- initial parameter arrays and input batches;
+- dtype and optimizer semantics;
+- clipping, sequence length, and microbatch;
+- warm-up and measured update count;
+- synchronization points;
+- machine, power state, macOS, and framework versions.
+
+Required metrics include:
+
+- numerical distance;
+- first-step and steady-state latency;
+- tokens per second;
 - process RSS;
-- current memory occupied by MPS tensors;
-- total memory allocated by the Metal driver for the process;
-- the recommended maximum MPS working set when available;
-- synchronized step duration;
-- loss and gradient norm;
-- model-state checksum.
-
-The current MPS tensor allocation is not a peak measurement. The field `accelerator_memory_measurement` identifies the measurement as `mps-current-allocated`.
-
-The runtime must not sum RSS, current MPS allocation, and driver allocation to claim total physical memory consumption.
-
-## 12. Static planner limitations
-
-The planner calculates parameter, gradient, and Adam-state sizes from the instantiated model. Activation, workspace, transfer-buffer, and streamed-working-set values are heuristics.
-
-It does not yet model:
-
-- unified-memory page residency;
-- operating-system memory pressure and compression;
-- allocator fragmentation;
-- exact MPS operator workspaces;
-- unsupported operator fallback;
-- storage latency and throughput;
-- transfer and compute overlap;
+- framework and driver allocator counters;
+- available memory, pressure, compression, and swap;
+- storage reads and writes;
 - SSD write amplification;
-- runtime-measured tensor lifetimes.
+- checkpoint and recovery cost.
 
-Its output is a planning hypothesis, not a guarantee that a run will fit or perform acceptably.
+An optimization is accepted only when it improves a declared objective without violating correctness, memory, endurance, stability, recovery, or reproducibility constraints.
 
-## 13. Validation contract
+If MLX materially outperforms PyTorch MPS for a required path, the project should add or select an MLX backend rather than retain a slower path by inertia. PyTorch remains the portable numerical reference.
 
-Correctness precedes scale.
+## 12. Benchmark contract
 
-The resident implementation is the numerical oracle. A future streamed path must use the same:
+The competitive harness uses:
 
-- initial parameters;
-- input batches;
-- random seeds;
-- optimizer configuration;
-- data types;
-- gradient-accumulation schedule.
+- one portable FP32 initial state generated outside either framework;
+- one deterministic portable token stream;
+- checksums for state and batches;
+- matching model structure and AdamW hyperparameters;
+- explicit warm-up and measured phases;
+- synchronization around every timed update;
+- raw step records and aggregated summaries;
+- separate framework memory semantics.
 
-Comparisons must include:
+Framework memory counters are not treated as directly comparable physical-memory values. macOS pressure and swap are required external cross-checks.
 
-- forward loss;
-- selected activations;
-- gradients;
-- optimizer states;
-- parameters after each update;
-- the trajectory across multiple steps.
+The PyTorch path has CPU automated coverage. The MLX path must be run and validated on the target M2 before a performance conclusion is accepted.
 
-Floating-point differences must be measured with documented tolerances. Approximate equality must not be described as exact equality.
+## 13. Storage and recovery requirements
 
-An MPS result must also report:
+The future tensor store should provide:
 
-- Mac model and chip;
-- total unified memory;
-- macOS version;
-- PyTorch version;
-- whether MPS is built and available;
-- MPS device name and core count when exposed;
-- all memory telemetry fields;
-- every warning, fallback, and failed operator.
-
-## 14. Storage and recovery requirements
-
-The future tensor store should use:
-
-- immutable chunks or copy-on-write versions;
+- immutable or copy-on-write chunks;
 - logical tensor versions;
 - per-chunk checksums;
-- a write-ahead journal;
+- write-ahead journaling;
 - atomic manifest publication;
 - incremental checkpoints;
+- bounded staging buffers;
+- read and write telemetry;
 - failure-injection tests.
 
-A step is committed only after all required chunks and the new manifest are valid. Until then, the previous committed version remains authoritative.
+A step is committed only after all required chunks and the new manifest are durable. Until then, the previous committed version remains authoritative.
 
-Recovery must distinguish committed steps, unpublished complete writes, partial writes, corrupt chunks, and stale cached state.
+## 14. Roadmap
 
-## 15. Roadmap
+### M0. Resident foundation
 
-### M0. Resident foundation and diagnostics
+Status: completed.
 
-- package, configuration, and CLI;
-- controlled model;
-- resident training baseline;
-- static planner;
-- checksums, telemetry, and artifacts;
-- CPU reproducibility tests;
-- MPS device support and diagnostics.
+### M1. Clean Mac M2 validation
 
-Status: implemented in code. Independent Mac M2 validation is still required.
+Status: completed with a strict protocol pass for the resident scope.
 
-### M1. Mac M2 resident characterization
+### M2. Competitive Apple Silicon baseline
 
-- execute the baseline on a real M2;
-- verify all required operators on MPS;
-- measure current and driver allocations across model sizes;
-- measure process RSS and operating-system pressure;
-- compare CPU and MPS numerical trajectories;
-- define safe logical budgets for an 8 GB system;
-- document reproducibility and unsupported operations.
+- execute PyTorch MPS, checkpointed PyTorch MPS, and MLX;
+- validate equal state and batches;
+- compare numerical trajectories, throughput, and memory behavior;
+- add compiled MLX and other justified variants;
+- document the backend decision.
 
-### M2. Versioned NVMe tensor store
+### M3. Versioned NVMe tensor store
 
-- tensor and chunk identifiers;
+- chunk identifiers and manifests;
 - checksums and copy-on-write versions;
-- journal and recovery tests;
-- read and write telemetry;
-- bounded staging buffers.
+- journal and recovery;
+- bounded staging;
+- storage telemetry.
 
-### M3. Synchronous NVMe-to-MPS execution
+### M4. Synchronous storage-to-accelerator execution
 
-- authoritative parameter and optimizer state in the tensor store;
-- load one layer or tile into the active MPS working set;
-- layer-wise forward and backward;
-- atomic optimizer-step publication;
-- comparison with the resident baseline.
+- authoritative state on NVMe;
+- layer-wise loading into a bounded working set;
+- forward, backward, and optimizer execution;
+- atomic step publication;
+- resident-versus-streamed comparison.
 
-### M4. Recomputation and strict budgets
+### M5. Recomputation and strict budgets
 
-- activation checkpoint selection;
+- activation checkpoint planning;
 - deterministic recomputation;
-- MPS, process-memory, and storage-budget rejection;
-- explicit handling of unified-memory pressure.
+- memory, pressure, storage, write, and time rejection rules.
 
-### M5. Asynchronous overlap
+### M6. Asynchronous overlap
 
 - double buffering;
-- storage prefetch and writeback;
+- prefetch and writeback;
 - stall measurement;
-- storage and execution overlap.
+- storage and accelerator overlap.
 
-### M6. Intra-layer tiling
+### M7. Intra-layer tiling
 
-- tiled linear and MLP paths;
+- linear and MLP tiles;
 - partitioned embeddings;
 - tiled output projection and loss;
 - normalization and attention paths.
 
-### M7. Constrained-hardware demonstration
+### M8. Constrained-hardware demonstration
 
 - validate around 124 million parameters;
-- attempt full-parameter training around 350 million parameters on an 8 GB M2-class system;
-- investigate larger targets only after the smaller result is correct and measurable.
+- attempt full-parameter training around 350 million parameters on the 8 GB M2 target;
+- investigate larger targets only after correctness and usefulness are measured.
 
-These scale targets are research goals, not current capabilities or guaranteed outcomes.
+Scale targets are research goals, not guaranteed outcomes.
 
-## 16. Benchmark and success criteria
+## 15. Success criteria
 
-Core metrics are:
+The first meaningful storage-backed milestone requires:
 
-- process RSS;
-- MPS tensor and driver allocations;
-- operating-system memory pressure where measurable;
-- tokens per second and seconds per step;
-- storage read and write bytes;
-- GPU or MPS stall time;
-- SSD write amplification;
-- checkpoint and recovery time;
-- numerical distance from the resident baseline;
-- energy per million tokens when measurement is available.
-
-The first meaningful streamed milestone requires:
-
-1. the active MPS working set remains inside configured logical limits;
-2. the complete state exceeds what can remain resident safely;
-3. the update is compared with the resident baseline;
+1. the active working set remains inside configured limits;
+2. the complete state exceeds safe resident capacity;
+3. updates are compared with the resident reference;
 4. every managed tensor version is traceable;
-5. storage reads and writes are reported;
+5. storage traffic and writes are reported;
 6. interruption recovers the last committed state;
-7. the result is reproducible from a documented configuration.
-
-## 17. Main risks
-
-- **Unified-memory ambiguity:** counters overlap and may not reveal physical residency directly.
-- **Memory pressure:** the operating system may compress or terminate the process before logical budgets are reached.
-- **MPS operator gaps:** some operations or data types may be unsupported or behave differently.
-- **Storage domination:** MPS may remain idle while tensor chunks are read or written.
-- **SSD endurance:** optimizer state and gradients may create impractical write volume.
-- **Numerical divergence:** recomputation and changed reduction order may alter training.
-- **Complexity without utility:** a technically larger model may still train too slowly to be useful.
-
-Every benchmark must report these costs instead of presenting parameter count in isolation.
-
-## 18. Related work and references
-
-MicroColossus builds on established work, including:
-
-- [PyTorch MPS backend](https://docs.pytorch.org/docs/stable/notes/mps.html)
-- [PyTorch activation checkpointing](https://docs.pytorch.org/docs/stable/checkpoint.html)
-- [ZeRO-Offload](https://arxiv.org/abs/2101.06840)
-- [ZeRO-Infinity](https://arxiv.org/abs/2104.07857)
-- [QLoRA](https://arxiv.org/abs/2305.14314)
-- [GaLore](https://arxiv.org/abs/2403.03507)
-- [LoHan](https://arxiv.org/abs/2403.06504)
-
-The project does not present those underlying techniques as original.
-
-Its proposed focus is the combination of:
-
-- an 8 GB Apple Silicon target;
-- unified-memory-aware accounting;
-- NVMe as a versioned canonical tensor store;
-- full-parameter reference execution;
-- tiling inside individual layers;
-- planning that includes elapsed time and SSD writes;
-- recovery integrated into execution;
-- strict separation between reference and approximate modes.
-
-This differentiation remains a hypothesis until it is implemented and compared experimentally.
-
-## 19. Project statement
-
-```text
-less resident state
-        in exchange for
-more storage traffic + more recomputation + more elapsed time
-```
-
-The intended contribution is a runtime that makes memory limits explicit, schedules around them where practical, preserves a measurable reference path, and reports the complete cost of doing so.
+7. the result is reproducible;
+8. throughput and endurance remain explicit, not hidden behind parameter count.

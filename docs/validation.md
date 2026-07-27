@@ -1,266 +1,243 @@
 # MicroColossus Validation Ledger
 
-This document records executable validation results and the exact boundary of what each run establishes.
+This ledger records executable evidence and the exact boundary of each result.
 
 ## Validation policy
 
-A run must identify the tested commit, environment, commands, generated artifacts, failures, and untested capabilities.
+A run must identify the tested commit, machine, software versions, commands, artifacts, failures, and capabilities that were not exercised.
 
-A planning result is not a training result. A resident result is not evidence of storage-backed or out-of-core execution. A CPU result is not evidence that MPS works on an Apple Silicon system.
+Mandatory distinctions:
 
-Strict protocol status and functional status are reported separately when a diagnostic applies local fixes without committing them. A functional pass does not become a clean repository pass until the same result is reproduced from a clean checkout of the integrated commit.
+- a static plan is not a training result;
+- resident training is not out-of-core training;
+- a CPU result is not evidence for MPS;
+- a functional pass with local source changes is not a clean protocol pass;
+- checksum equality is stronger than numerical agreement;
+- framework memory counters are not assumed to represent equivalent physical memory;
+- full-parameter, compact, and adapter methods are reported separately.
 
-## First independent M0 diagnostic. July 27, 2026
+## First M0 diagnostic. July 27, 2026
 
-### Scope
+Tested commit:
 
-The diagnostic tested commit `37fb45b189d13bab2b6f4084af0c21993f65ceff` on `main`.
-
-It attempted to validate:
-
-- isolated installation;
-- Ruff, pytest, compileall, and mypy;
-- static planning;
-- resident CPU training;
-- CPU reproducibility;
-- fixed-batch learning behavior;
-- CUDA execution when available;
-- artifact integrity;
-- source-tree cleanliness.
-
-### Reported result
+```text
+37fb45b189d13bab2b6f4084af0c21993f65ceff
+```
 
 Overall result: **FAIL**.
 
 Confirmed successes:
 
-- installation completed after a network retry;
-- the static planner completed for CPU and automatic-device configurations;
-- `compileall` passed;
-- the repository remained unchanged;
-- CUDA was unavailable and was correctly skipped.
+- isolated installation completed after a network retry;
+- the static planner completed;
+- bytecode compilation passed;
+- CUDA was unavailable and was skipped correctly;
+- the source tree remained clean.
 
-Blocking failures:
+Blocking findings:
 
-1. Ruff reported an import-format issue in `microcolossus/planner.py`.
-2. pytest failed because checksum telemetry called `Tensor.numpy()` in an environment where NumPy was unavailable.
-3. Every resident run stopped while calculating the model checksum.
-4. CPU reproducibility and fixed-batch results could not complete because checksum telemetry aborted execution.
-5. mypy reported missing third-party stubs and typing issues.
+1. Ruff found an import-format problem in `microcolossus/planner.py`.
+2. Checksum telemetry called `Tensor.numpy()` without NumPy available.
+3. Resident runs stopped while calculating the checksum.
+4. Reproducibility and fixed-batch diagnostics could not complete.
+5. mypy found third-party stub and local typing problems.
 
-The run did not test or establish any claim about:
+This run did not validate MPS or any storage-backed capability.
 
-- MPS execution;
-- NVMe-backed state;
-- activation offloading;
-- asynchronous transfers;
-- intra-layer tiling;
-- training state larger than resident memory.
+## Corrective MPS implementation
 
-## Corrective implementation after the first diagnostic
+The next implementation:
 
-The next implementation removed the implicit NumPy dependency and changed the primary accelerator direction to Apple MPS.
-
-Changes included:
-
-- hashing raw CPU tensor storage without calling NumPy;
-- tests that force `Tensor.numpy()` to fail;
-- checksum tests for stability, state changes, and bfloat16 tensors;
-- explicit `mps` device support;
-- `auto` device selection that prefers MPS;
-- synchronized MPS step timing;
-- MPS current tensor allocation, Metal driver allocation, and recommended working-set telemetry;
-- `microcolossus doctor` environment reporting;
-- a dedicated `examples/tiny-mps.yaml` configuration;
-- unified-memory warnings in the static planner;
-- planner typing corrections;
-- third-party type stubs;
-- mypy and a CPU smoke run in CI.
-
-Maintainer-side CPU verification completed tests, bytecode compilation, resident runs, expected artifacts, static MPS-oriented planning, and environment reporting. It did not verify real Metal execution.
+- removed the implicit NumPy dependency from model checksums;
+- added checksum regression tests, including bfloat16 state;
+- introduced explicit `mps` support and MPS-first automatic selection;
+- synchronized MPS timing;
+- added MPS tensor, Metal driver, and recommended working-set telemetry;
+- added `microcolossus doctor`;
+- added an M2-oriented configuration;
+- made the planner aware of unified-memory accounting;
+- corrected typing and CI coverage.
 
 ## First real Mac M2 diagnostic. July 27, 2026
 
-### Tested source and machine
+The first hardware diagnostic started from:
 
-The diagnostic started from commit `29e7a1c4b3d012b3dc1e223a97f35e1bd865e22e` on `main`.
+```text
+29e7a1c4b3d012b3dc1e223a97f35e1bd865e22e
+```
 
-Environment reported by the independent run:
+Environment:
 
 - MacBook Air;
 - Apple M2;
 - 8 GB unified memory;
-- native `arm64` execution;
+- native arm64 execution;
 - no Rosetta translation;
-- PyTorch `2.13.0`;
-- MPS built: `true`;
-- MPS available: `true`;
-- MPS fallback environment variable unset.
+- PyTorch 2.13.0;
+- MPS built and available;
+- deliberate MPS-to-CPU fallback disabled.
 
-### Strict and functional results
+Strict protocol result: **FAIL** because two source fixes were intentionally left in the working tree.
 
-Strict protocol result: **FAIL**.
+Functional result after those fixes: **PASS** for the resident MPS scope.
 
-The strict result was caused by the final source-tree check. Two fixes were intentionally applied to tracked files during the post-baseline rerun, so the working tree was not clean.
+The fixes were:
 
-Functional post-fix result: **PASS** for the implemented resident MPS scope.
+1. remove an extra blank line that failed Ruff formatting;
+2. calculate the global gradient norm without constructing float64 tensors on MPS.
 
-Post-fix checks:
+The MPS-safe path accumulates float32 squared-gradient sums on the device, transfers scalar values to CPU, and combines them with Python floating-point summation. A regression test protects this behavior.
 
-- Ruff: passed;
-- pytest: passed, 20 tests;
-- compileall: passed;
-- mypy: passed;
-- explicit MPS training: passed;
-- automatic device selection: passed and resolved to `mps`;
-- larger resident MPS smoke run: passed;
-- no post-fix command failed.
-
-### Fixes identified by the Mac M2 run
-
-1. `microcolossus/planner.py` contained an extra blank line that caused Ruff import formatting to fail.
-2. `microcolossus/training.py` calculated the gradient norm through float64 tensors. MPS does not support that path. The corrected implementation calculates float32 squared sums on the active device, transfers scalar values to CPU, and combines them with Python floating-point accumulation.
-
-Both fixes are now integrated in `main`, together with a regression test that rejects a return to `Tensor.double()` in the gradient-norm path.
-
-### Numerical results
-
-MPS reproducibility was not bitwise exact. The final parameter checksum differed at step 2, while loss and gradient norm were identical at the first differing step.
-
-The run therefore classified repeated MPS execution as divergent by checksum, but the available scalar trajectory did not show a corresponding numerical instability.
-
-CPU versus MPS one-step comparison reported:
+Reported CPU-versus-MPS one-step differences for the tiny workload:
 
 - worst parameter absolute difference: `9.277835488319397e-06`;
 - worst parameter relative difference: `0.0005274261347949505`;
 - worst optimizer-state absolute difference: `3.259629011154175e-09`;
 - worst optimizer-state relative difference: `0.004142380319535732`.
 
-These measurements are evidence of close behavior for the tested tiny workload. They are not a general tolerance standard for every architecture, dtype, operator, or training duration.
+The fixed-batch MPS diagnostic reduced loss from `5.566842079162598` to `0.4145740866661072`.
 
-### Learning behavior
+Repeated MPS runs were not bitwise identical by final checksum. Loss and gradient norm were identical at the first checksum divergence. MPS reproducibility is therefore evaluated numerically as well as bitwise.
 
-The fixed-batch MPS diagnostic reduced loss from:
+## Clean Mac M2 rerun. July 27, 2026
 
-```text
-5.566842079162598
-```
-
-to:
+Tested commit:
 
 ```text
-0.4145740866661072
+a56fc514f2f8e705654034f3c2f02e3a441c61f3
 ```
 
-This establishes that the tested resident model and AdamW path can learn the repeated synthetic batch on MPS. It does not establish language-model quality or out-of-core correctness.
+Environment:
 
-### Memory observations
+- MacBook Air;
+- Apple M2;
+- 8 GB unified memory;
+- native arm64 execution;
+- no Rosetta translation;
+- PyTorch 2.13.0;
+- MPS built and available.
 
-Maximum values reported across the diagnostic were:
+Overall result: **PASS**.
 
-- process RSS: `414744576` bytes;
-- current MPS tensor allocation: `394506496` bytes;
-- Metal driver allocation: `1156251648` bytes.
+Protocol integrity:
 
-These counters overlap under unified memory and must not be summed as physical memory use.
+- `git status --short` was empty before the run;
+- no source fix was required during the run;
+- `git status --short` was empty after the run.
 
-Swap change reported by the individual experiments:
+Passed checks:
 
-- tiny MPS runs: `0` bytes;
-- tiny 10-step run: `-16777216` bytes;
-- larger resident MPS run: `669054402` bytes.
+- Ruff;
+- pytest, 21 tests;
+- compileall;
+- mypy;
+- MPS preflight;
+- explicit MPS resident training;
+- automatic device selection, resolved to `mps`;
+- larger resident MPS smoke run;
+- CPU-versus-MPS diagnostic;
+- fixed-batch MPS overfit diagnostic.
 
-The larger run's swap growth is a signal that future scale tests must include memory pressure, compression, swap, thermal state, and elapsed time. It is not by itself proof of a leak.
+Observed learning result:
 
-### Fallback and operator support
+```text
+5.566842079162598 -> 0.4145740866661072
+```
 
-`PYTORCH_ENABLE_MPS_FALLBACK` was unset. The filtered diagnostic scan reported no evidence of:
+The diagnostic reported no evidence of deliberate CPU fallback, unsupported MPS operators in the tested path, NaN, infinity, or MPS out-of-memory failure.
 
-- CPU fallback;
-- unimplemented operators;
-- unsupported operators;
-- MPS out-of-memory failures;
-- high-watermark failures;
-- allocation failures.
+One warning reported that NumPy was not installed. It did not block resident training because core checksums no longer require NumPy. Version 0.3.0 declares NumPy explicitly for development and competitive benchmarks.
 
-Absence of evidence in this run does not prove that all future operators and model sizes are supported.
+### Exact boundary of the clean pass
 
-### Exact boundary of the result
+The clean pass validates:
 
-The run validated only:
+- package installation and project checks;
+- the controlled decoder-only Transformer;
+- full-parameter resident AdamW training;
+- the tested MPS operator path;
+- device selection and diagnostics;
+- resident telemetry and artifact generation;
+- the tested tiny and small configurations.
 
-- resident full-parameter training;
-- the controlled Transformer used by the prototype;
-- the tested MPS operators;
-- current diagnostic and telemetry paths;
-- the tested tiny and small resident configurations.
+It does not validate:
 
-It did not test:
-
-- NVMe-backed parameters or optimizer states;
-- out-of-core training;
-- storage-to-MPS streaming;
-- activation offloading;
-- planned recomputation;
+- NVMe-backed parameters or optimizer state;
+- storage-to-accelerator streaming;
+- out-of-core execution;
+- runtime-managed activation recomputation;
 - asynchronous prefetch or writeback;
 - intra-layer tiling;
+- crash recovery;
 - training state larger than safe resident unified memory.
+
+## Competitive benchmark harness. Version 0.3.0
+
+After the clean M2 pass, the repository added a backend-neutral resident benchmark harness.
+
+Implemented benchmark features:
+
+- one portable FP32 parameter state generated outside either framework;
+- one portable deterministic token-batch stream;
+- matching controlled Transformer architecture in PyTorch and MLX;
+- synchronized warm-up and measured phases;
+- uncheckpointed PyTorch resident execution;
+- PyTorch activation-checkpointing execution;
+- an uncompiled MLX resident implementation;
+- matching AdamW coefficients, epsilon, bias correction, clipping, batch, and sequence settings;
+- first-step and steady-state latency statistics;
+- tokens per second;
+- process RSS, framework allocator values, available system memory, memory percentage, and swap usage;
+- machine-readable benchmark and comparison schemas;
+- checksums for the portable initial state and input batches;
+- warnings that prevent allocator counters from being treated as physical-memory equivalents.
+
+The PyTorch CPU benchmark and checkpointed variant have automated test coverage and a CI smoke command.
+
+The MLX backend is implemented against documented MLX APIs, but it is not considered validated until it runs on the target M2 and its model, optimizer, loss, parameter count, and artifacts are checked.
 
 ## Competitive validation gate
 
-MicroColossus must remain competitive with the strongest relevant alternatives on the same target hardware.
-
-The mandatory direct baseline set for Apple Silicon begins with:
+Direct Apple Silicon baselines begin with:
 
 1. resident PyTorch MPS;
-2. PyTorch MPS with activation checkpointing when applicable;
-3. native MLX with an equivalent controlled Transformer;
-4. MLX-LM full-model fine-tuning when the workload can be matched;
-5. MicroColossus reference mode;
-6. MicroColossus compact and adapter modes, reported separately.
+2. PyTorch MPS with activation checkpointing;
+3. native MLX with the equivalent controlled Transformer;
+4. compiled MLX as a later optimized variant;
+5. MLX-LM full-model fine-tuning when semantically comparable;
+6. MicroColossus reference execution;
+7. future compact and adapter modes, reported separately.
 
-Storage-offload systems that cannot run on MPS, including ZeRO-Infinity and LoHan, remain architectural and algorithmic references rather than direct hardware benchmarks.
+Storage-offload systems that cannot run on MPS remain architectural references rather than direct hardware benchmarks.
 
-Every comparison must document:
+Every accepted comparison records:
 
-- exact model architecture and parameter count;
-- initialization, input batches, and random seeds;
-- dtype, optimizer, clipping, and update semantics;
-- sequence length, batch configuration, and step count;
-- warm-up and synchronization policy;
-- macOS, framework, and package versions;
-- machine power, thermal, and memory-pressure conditions where measurable.
-
-Required outputs include:
-
-- numerical distance from the reference;
+- architecture and unique parameter count;
+- initial state and batch checksums;
+- precision, optimizer, clipping, and update semantics;
+- sequence length, microbatch, warm-up, and measured steps;
+- synchronization policy;
+- exact framework, Python, macOS, and repository versions;
 - first-step and steady-state latency;
 - tokens per second;
-- process RSS;
-- current MPS allocation;
-- Metal driver allocation;
-- swap growth and memory pressure;
-- NVMe bytes and SSD writes when storage is involved;
-- checkpoint and recovery cost when implemented.
+- process footprint, framework memory counters, available memory, pressure, and swap;
+- storage bytes and SSD writes when storage is involved;
+- numerical distance from the reference.
 
-A proposed optimization is accepted only if it improves a declared objective while respecting correctness, memory, endurance, and reproducibility constraints.
-
-MLX is a mandatory baseline because it is designed specifically for Apple Silicon, exposes lazy graph execution, and uses shared unified-memory arrays across CPU and GPU operations. If an MLX implementation materially outperforms PyTorch MPS for a required path, MicroColossus should add an MLX backend or adopt MLX for that path. PyTorch remains the portable numerical reference.
-
-Full-parameter training results must not be presented as equivalent to LoRA, QLoRA, low-rank optimizer methods, quantized optimizer state, or other approximate modes.
+An optimization is accepted only when it improves a declared objective without violating correctness, memory, endurance, stability, recovery, or reproducibility constraints.
 
 ## Next required validation
 
-The next diagnostic must start from a clean checkout containing the integrated fixes and must leave the working tree clean.
+The next target-hardware run should:
 
-It should include:
+1. install the `benchmark` extra on the clean M2 checkout;
+2. run PyTorch MPS without activation checkpointing;
+3. run PyTorch MPS with activation checkpointing;
+4. run the uncompiled MLX backend with the same configuration;
+5. compare initial-state and batch checksums;
+6. compare loss trajectories and throughput;
+7. inspect framework memory values together with macOS pressure and swap;
+8. preserve all JSON artifacts and exact versions;
+9. leave the source tree clean.
 
-1. all existing M2 checks;
-2. two repeated MPS runs with tensor-level numerical comparison;
-3. an equivalent controlled Transformer implemented in MLX;
-4. PyTorch MPS versus MLX throughput and memory comparison;
-5. macOS memory-pressure and swap observations;
-6. warm-up-separated latency statistics;
-7. complete artifacts and exact framework versions.
-
-Only after that clean rerun should the resident M2 milestone receive an unqualified protocol `PASS`.
+No backend decision should be made before those results exist.
