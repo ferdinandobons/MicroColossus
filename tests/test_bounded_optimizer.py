@@ -80,8 +80,10 @@ def test_bounded_optimizer_matches_resident_state_exactly(tmp_path: Path) -> Non
     bundle = StepBundleStore.open(tmp_path / "bundle")
     assert bundle.verify().committed_step == 1
     assert bundle.recover().current_bundle_id == result.final_bundle_id
-    assert VersionedTensorStore.open(result.candidate_parameter_store_path).verify().tensor_count == 12
-    assert VersionedTensorStore.open(result.candidate_optimizer_store_path).verify().tensor_count == 37
+    parameter_store = VersionedTensorStore.open(result.candidate_parameter_store_path)
+    optimizer_store = VersionedTensorStore.open(result.candidate_optimizer_store_path)
+    assert parameter_store.verify().tensor_count == 12
+    assert optimizer_store.verify().tensor_count == 37
 
 
 def test_bounded_optimizer_is_deterministic_on_cpu(tmp_path: Path) -> None:
