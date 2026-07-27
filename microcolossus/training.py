@@ -143,9 +143,10 @@ def run_resident_step(
 
     started = time.perf_counter()
     output = model(input_ids, targets)
-    if output.loss is None:
+    loss = output.loss
+    if loss is None:
         raise RuntimeError("the model did not return a training loss")
-    output.loss.backward()
+    loss.backward()
     gradient_norm = _gradient_norm(model)
     if gradient_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
@@ -156,7 +157,7 @@ def run_resident_step(
 
     return StepMetrics(
         step=step,
-        loss=float(output.loss.detach().cpu().item()),
+        loss=float(loss.detach().cpu().item()),
         gradient_norm=gradient_norm,
         duration_seconds=duration_seconds,
         process_rss_bytes=process_rss_bytes(),

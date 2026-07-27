@@ -42,7 +42,8 @@ def _optional_backend_value(name: str) -> Any:
 
 
 def _optional_mps_value(name: str) -> int | None:
-    function = getattr(torch.mps, name, None)
+    namespace = getattr(torch, "mps", None)
+    function = getattr(namespace, name, None) if namespace is not None else None
     if not callable(function):
         return None
     try:
@@ -57,6 +58,8 @@ def collect_environment() -> EnvironmentReport:
     backend = getattr(torch.backends, "mps", None)
     mps_built = bool(backend is not None and backend.is_built())
     mps_available = bool(backend is not None and backend.is_available())
+    device_name = _optional_backend_value("get_name") if mps_available else None
+    core_count = _optional_backend_value("get_core_count") if mps_available else None
     return EnvironmentReport(
         platform=platform.platform(),
         machine=platform.machine(),
@@ -67,15 +70,8 @@ def collect_environment() -> EnvironmentReport:
         cuda_version=torch.version.cuda,
         mps_built=mps_built,
         mps_available=mps_available,
-        mps_device_name=(
-            str(_optional_backend_value("get_name")) if mps_available else None
-        ),
-        mps_core_count=(
-            int(value)
-            if mps_available
-            and (value := _optional_backend_value("get_core_count")) is not None
-            else None
-        ),
+        mps_device_name=str(device_name) if device_name is not None else None,
+        mps_core_count=int(core_count) if core_count is not None else None,
         mps_recommended_max_memory_bytes=(
             _optional_mps_value("recommended_max_memory") if mps_available else None
         ),
