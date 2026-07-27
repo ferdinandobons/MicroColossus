@@ -49,15 +49,17 @@ jobs:
 
           path = Path("microcolossus/bounded_backward.py")
           text = path.read_text()
-          old = '''            bounded_loss = float(loss.detach().cpu().item())
-                      output_activation_bytes = _activation_bytes(output)
-                  elif spec.name.startswith("block-"):
-          '''
-          new = '''            bounded_loss = float(loss.detach().cpu().item())
-                      output_activation_bytes = _activation_bytes(output)
-                      del loss
-                  elif spec.name.startswith("block-"):
-          '''
+          old = (
+              "            bounded_loss = float(loss.detach().cpu().item())\n"
+              "            output_activation_bytes = _activation_bytes(output)\n"
+              "        elif spec.name.startswith(\"block-\"):\n"
+          )
+          new = (
+              "            bounded_loss = float(loss.detach().cpu().item())\n"
+              "            output_activation_bytes = _activation_bytes(output)\n"
+              "            del loss\n"
+              "        elif spec.name.startswith(\"block-\"):\n"
+          )
           if old not in text:
               if "            del loss\n        elif spec.name.startswith" in text:
                   raise SystemExit(0)
