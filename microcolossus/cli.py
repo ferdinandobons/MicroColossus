@@ -7,12 +7,6 @@ import json
 from collections.abc import Sequence
 from dataclasses import asdict
 
-from .config import load_experiment_config
-from .environment import collect_environment
-from .model import DecoderOnlyTransformer
-from .planner import build_static_plan
-from .training import format_step_metrics, run_resident_experiment, seed_everything
-
 
 def _benchmark_import_error(exc: ModuleNotFoundError) -> RuntimeError:
     dependency = exc.name or "benchmark dependency"
@@ -26,8 +20,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="microcolossus",
         description=(
-            "MicroColossus resident baselines, competitive benchmarks, MPS diagnostics, "
-            "and static planning."
+            "MicroColossus storage, resident baselines, competitive benchmarks, "
+            "MPS diagnostics, and static planning."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -53,9 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "--config", required=True, help="path to an experiment YAML file"
     )
-    benchmark.add_argument(
-        "--backend", choices=("pytorch", "mlx"), required=True
-    )
+    benchmark.add_argument("--backend", choices=("pytorch", "mlx"), required=True)
     benchmark.add_argument("--warmup-steps", type=int, default=2)
     benchmark.add_argument("--steps", type=int, default=10, help="measured steps")
     benchmark.add_argument("--output", required=True, help="benchmark JSON output")
@@ -71,11 +63,66 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--left", required=True, help="first benchmark JSON")
     compare.add_argument("--right", required=True, help="second benchmark JSON")
     compare.add_argument("--output", required=True, help="comparison JSON output")
+
+    store_init = subcommands.add_parser(
+        "store-init", help="create an empty versioned tensor store"
+    )
+    store_init.add_argument("--path", required=True, help="tensor store directory")
+    store_init.add_argument("--chunk-size-mib", type=int, default=4)
+    store_init.add_argument("--max-storage-gib", type=float, default=100.0)
+    store_init.add_argument("--max-staging-mib", type=int, default=16)
+
+    store_verify = subcommands.add_parser(
+        "store-verify", help="verify manifests, chunks, and tensor checksums"
+    )
+    store_verify.add_argument("--path", required=True, help="tensor store directory")
+    store_verify.add_argument("--manifest", default=None, help="optional manifest ID")
+
+    store_recover = subcommands.add_parser(
+        "store-recover", help="recover incomplete transactions without publishing them"
+    )
+    store_recover.add_argument("--path", required=True, help="tensor store directory")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+
+    if args.command == "store-init":
+        from .storage import StoreLimits, VersionedTensorStore
+
+        mib = 1024**2
+        gib = 1024**3
+        store = VersionedTensorStore.create(
+            args.path,
+            limits=StoreLimits(
+                chunk_size_bytes=args.chunk_size_mib * mib,
+                max_storage_bytes=int(args.max_storage_gib * gib),
+                max_staging_bytes=args.max_staging_mib * mib,
+            ),
+        )
+        print(json.dumps(store.current_manifest().to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "store-verify":
+        from .storage import VersionedTensorStore
+
+        report = VersionedTensorStore.open(args.path).verify(args.manifest)
+        print(json.dumps(asdict(report), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "store-recover":
+        from .storage import VersionedTensorStore
+
+        report = VersionedTensorStore.open(args.path).recover()
+        print(json.dumps(asdict(report), indent=2, sort_keys=True))
+        return 0
+
+    from .config import load_experiment_config
+    from .environment import collect_environment
+    from .model import DecoderOnlyTransformer
+    from .planner import build_static_plan
+    from .training import format_step_metrics, run_resident_experiment, seed_everything
 
     if args.command == "doctor":
         print(json.dumps(collect_environment().to_dict(), indent=2, sort_keys=True))

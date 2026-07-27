@@ -23,7 +23,17 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Type check
-        run: mypy microcolossus
+        shell: bash
+        run: |
+          set -o pipefail
+          mypy microcolossus 2>&1 | tee mypy-${{ matrix.python-version }}.txt
+      - name: Upload type-check diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mypy-${{ matrix.python-version }}
+          path: mypy-${{ matrix.python-version }}.txt
+          if-no-files-found: error
       - name: Test
         run: python -m pytest
       - name: Compile
@@ -39,3 +49,10 @@ jobs:
             --warmup-steps 0 \
             --steps 1 \
             --output /tmp/microcolossus-benchmark.json
+          microcolossus store-init \
+            --path /tmp/microcolossus-store \
+            --chunk-size-mib 1 \
+            --max-staging-mib 1 \
+            --max-storage-gib 0.01
+          microcolossus store-verify --path /tmp/microcolossus-store
+          microcolossus store-recover --path /tmp/microcolossus-store
