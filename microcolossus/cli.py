@@ -82,6 +82,22 @@ def _parser() -> argparse.ArgumentParser:
         "store-recover", help="recover incomplete transactions without publishing them"
     )
     store_recover.add_argument("--path", required=True, help="tensor store directory")
+
+    storage_step = subcommands.add_parser(
+        "storage-step",
+        help="compare one resident update with an observable storage-backed update",
+    )
+    storage_step.add_argument(
+        "--config", required=True, help="path to an experiment YAML file"
+    )
+    storage_step.add_argument("--store", required=True, help="new tensor store directory")
+    storage_step.add_argument("--output", required=True, help="result JSON path")
+    storage_step.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default=None,
+        help="override configured execution device",
+    )
     return parser
 
 
@@ -153,6 +169,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for item in metrics:
             print(format_step_metrics(item))
+        return 0
+
+    if args.command == "storage-step":
+        from .storage_training import run_observable_storage_step
+
+        result = run_observable_storage_step(
+            config,
+            store_path=args.store,
+            output_path=args.output,
+            device_override=args.device,
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return 0
 
     if args.command == "benchmark":
