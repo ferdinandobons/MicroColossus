@@ -21,7 +21,7 @@ from microcolossus.step_bundle import (
     BundleSimulatedCrash,
     StepBundleStore,
 )
-from microcolossus.storage import VersionedTensorStore
+from microcolossus.storage import IntegrityError, VersionedTensorStore
 from microcolossus.storage_training import compare_states
 
 
@@ -95,8 +95,14 @@ def test_bounded_training_advances_three_steps_exactly(tmp_path: Path) -> None:
     assert [item.batch_cursor for item in result.steps] == [0, 1, 2]
     assert result.final_bounded_vs_resident_state.exact_bytes
     assert result.final_bundle_vs_restored_state.exact_bytes
+    assert result.batch_cursor_derived_from_committed_step
+    assert result.full_final_state_materialized_for_validation
+    assert result.resident_reference_replayed_from_step_zero
+    assert result.historical_bundles_retained
     assert all(item.resident_vs_candidate_state.exact_bytes for item in result.steps)
     assert all(item.candidate_vs_restored_state.exact_bytes for item in result.steps)
+    assert all(item.full_candidate_state_materialized_for_validation for item in result.steps)
+    assert all(item.resident_oracle_materialized_for_validation for item in result.steps)
     assert all(value == 3.0 for _, value in result.optimizer_step_values)
     assert StepBundleStore.open(tmp_path / "bundle").verify().committed_step == 3
 
@@ -126,6 +132,7 @@ def test_resumed_training_matches_uninterrupted_training(tmp_path: Path) -> None
     )
 
     assert first.final_step == 2
+    assert first.final_bounded_vs_resident_state.exact_bytes
     assert resumed.resumed
     assert resumed.started_step == 2
     assert resumed.final_step == 5
@@ -136,6 +143,8 @@ def test_resumed_training_matches_uninterrupted_training(tmp_path: Path) -> None
         _current_state(tmp_path / "uninterrupted"),
     )
     assert comparison.exact_bytes
+    assert resumed.final_bounded_vs_resident_state.exact_bytes
+    assert uninterrupted.final_bounded_vs_resident_state.exact_bytes
     assert all(value == 5.0 for _, value in resumed.optimizer_step_values)
     assert [item.committed_step for item in resumed.lineage] == list(range(6))
 
@@ -158,6 +167,33 @@ def test_resume_rejects_semantic_configuration_change(tmp_path: Path) -> None:
         run_bounded_training(
             changed,
             bundle_store_path=tmp_path / "bundle",
+            target_step=2,
+            device_override="cpu",
+            optimizer_working_set_bytes=1024**2,
+        )
+
+
+def test_resume_detects_corrupt_current_child_store(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    bundle_path = tmp_path / "bundle"
+    run_bounded_training(
+        config,
+        bundle_store_path=bundle_path,
+        target_step=1,
+        device_override="cpu",
+        optimizer_working_set_bytes=1024**2,
+    )
+    bundle = StepBundleStore.open(bundle_path)
+    current = bundle.current_manifest()
+    parameter_store_path = bundle_path / current.parameter_store.path
+    parameter_store = VersionedTensorStore.open(parameter_store_path)
+    chunk = parameter_store.current_manifest().chunks[0]
+    (parameter_store_path / chunk.storage_path).write_bytes(b"corrupt")
+
+    with pytest.raises(IntegrityError):
+        run_bounded_training(
+            config,
+            bundle_store_path=bundle_path,
             target_step=2,
             device_override="cpu",
             optimizer_working_set_bytes=1024**2,
