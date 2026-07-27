@@ -209,7 +209,7 @@ def export_pytorch_adamw(model: Any, optimizer: Any) -> tuple[TensorPayload, ...
             )
     groups: list[dict[str, Any]] = []
     for group in optimizer.param_groups:
-        encoded = {
+        encoded: dict[str, Any] = {
             key: value
             for key, value in group.items()
             if key != "params" and isinstance(value, (str, int, float, bool, type(None)))
