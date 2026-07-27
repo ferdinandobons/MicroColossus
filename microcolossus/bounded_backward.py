@@ -6,9 +6,10 @@ import gc
 import hashlib
 import math
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import Tensor
@@ -175,7 +176,7 @@ def _batch_checksum(input_ids: Tensor, targets: Tensor) -> str:
         digest.update(str(contiguous.dtype).encode("ascii"))
         digest.update(str(tuple(contiguous.shape)).encode("ascii"))
         byte_view = contiguous.reshape(-1).view(torch.uint8)
-        digest.update(bytes(byte_view.untyped_storage()))
+        digest.update(bytes(cast(Iterable[int], byte_view.untyped_storage())))
     return digest.hexdigest()
 
 
@@ -330,7 +331,7 @@ def _bounded_forward_activations(
                 )
             )
             if spec.name == "final-head":
-                del output, output_cpu, loss
+                del output, output_cpu
             else:
                 del output_cpu
 
@@ -602,8 +603,6 @@ def run_bounded_backward(
         process_rss = process_rss_bytes()
         release_started = time.perf_counter()
         del tensors, gradients, gradient_payloads, output
-        if spec.name == "final-head":
-            del loss
         if spec.name != "embedding":
             del local_input
         gc.collect()
