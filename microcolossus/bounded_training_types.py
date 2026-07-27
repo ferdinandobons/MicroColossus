@@ -38,8 +38,6 @@ class PersistentStepResult:
     parameter_budget_respected: bool
     gradient_budget_respected: bool
     optimizer_budget_respected: bool
-    full_candidate_state_materialized_for_validation: bool
-    resident_oracle_materialized_for_validation: bool
     resident_loss: float
     bounded_loss: float
     loss_absolute_difference: float
@@ -64,6 +62,8 @@ class PersistentStepResult:
     total_parameter_physical_bytes_written: int
     total_optimizer_logical_bytes_written: int
     total_optimizer_physical_bytes_written: int
+    full_candidate_state_materialized_for_validation: bool = True
+    resident_oracle_materialized_for_validation: bool = True
 
 
 @dataclass(frozen=True)
@@ -85,10 +85,6 @@ class BoundedTrainingResult:
     final_bounded_vs_resident_state: StateComparison
     final_bundle_vs_restored_state: StateComparison
     final_batch_cursor: int
-    batch_cursor_derived_from_committed_step: bool
-    full_final_state_materialized_for_validation: bool
-    resident_reference_replayed_from_step_zero: bool
-    historical_bundles_retained: bool
     optimizer_step_values: tuple[tuple[str, float], ...]
     total_parameter_logical_bytes_read: int
     total_gradient_logical_bytes_read: int
@@ -97,6 +93,10 @@ class BoundedTrainingResult:
     total_parameter_physical_bytes_written: int
     total_optimizer_logical_bytes_written: int
     total_optimizer_physical_bytes_written: int
+    batch_cursor_derived_from_committed_step: bool = True
+    full_final_state_materialized_for_validation: bool = True
+    resident_reference_replayed_from_step_zero: bool = True
+    historical_bundles_retained: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
