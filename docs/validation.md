@@ -1,6 +1,6 @@
 # MicroColossus Validation Ledger
 
-This ledger records executable evidence and the exact boundary of each result.
+This ledger records executable evidence, engineering decisions, and the exact boundary of each result.
 
 ## Validation policy
 
@@ -10,11 +10,13 @@ Mandatory distinctions:
 
 - a static plan is not a training result;
 - resident training is not out-of-core training;
-- a CPU result is not evidence for MPS;
+- a CPU result is not evidence for MPS or MLX;
 - a functional pass with local source changes is not a clean protocol pass;
 - checksum equality is stronger than numerical agreement;
 - framework memory counters are not assumed to represent equivalent physical memory;
-- full-parameter, compact, and adapter methods are reported separately.
+- full-parameter, compact, and adapter methods are reported separately;
+- a performance result is not accepted unless initialization, inputs, optimizer semantics, synchronization, and measured phases are documented;
+- a larger parameter count is not a successful result when correctness, throughput, recovery, or storage endurance are unacceptable.
 
 ## First M0 diagnostic. July 27, 2026
 
@@ -146,7 +148,7 @@ Observed learning result:
 
 The diagnostic reported no evidence of deliberate CPU fallback, unsupported MPS operators in the tested path, NaN, infinity, or MPS out-of-memory failure.
 
-One warning reported that NumPy was not installed. It did not block resident training because core checksums no longer require NumPy. Version 0.3.0 declares NumPy explicitly for development and competitive benchmarks.
+One warning reported that NumPy was not installed. It did not block resident training because core checksums no longer require NumPy. NumPy is now an explicit dependency of the development and benchmark extras, not of the core runtime.
 
 ### Exact boundary of the clean pass
 
@@ -175,7 +177,7 @@ It does not validate:
 
 After the clean M2 pass, the repository added a backend-neutral resident benchmark harness.
 
-Implemented benchmark features:
+Implemented features:
 
 - one portable FP32 parameter state generated outside either framework;
 - one portable deterministic token-batch stream;
@@ -192,9 +194,55 @@ Implemented benchmark features:
 - checksums for the portable initial state and input batches;
 - warnings that prevent allocator counters from being treated as physical-memory equivalents.
 
-The PyTorch CPU benchmark and checkpointed variant have automated test coverage and a CI smoke command.
+The PyTorch CPU benchmark and checkpointed variant received automated test coverage and a CI smoke command.
 
-The MLX backend is implemented against documented MLX APIs, but it is not considered validated until it runs on the target M2 and its model, optimizer, loss, parameter count, and artifacts are checked.
+The MLX backend was implemented against documented MLX APIs. It was not considered validated because it had not run on the target M2.
+
+## Benchmark hardening. Version 0.3.1
+
+A design review found that the version 0.3.0 benchmark kept the portable NumPy initialization state alive while the framework model was being measured. On an 8 GB unified-memory system, that duplicate full-model copy would inflate process memory and could distort swap and pressure results.
+
+Version 0.3.1 changes the benchmark contract:
+
+- initial swap is sampled before constructing portable state;
+- the backend loads the portable state and clears the NumPy state dictionary before warm-up;
+- garbage collection runs before measured execution;
+- the result records whether the initialization state was released;
+- the result records the byte size of portable state and batches;
+- final parameters are exported only after the timed region;
+- final parameters are written atomically to a sibling `.state.npz` artifact;
+- the final-state artifact is protected by a checksum;
+- benchmark comparison loads and verifies both state artifacts;
+- every final parameter tensor is compared for maximum absolute, mean absolute, and maximum relative difference;
+- comparisons record finite-value status and the worst absolute and relative tensors;
+- the implementation was split into schema, data, runner, comparison, and backend modules.
+
+Development-environment verification for the hardened path:
+
+- five dedicated benchmark tests passed;
+- identical PyTorch CPU runs produced zero final-state tensor difference;
+- the activation-checkpointing variant completed;
+- state artifacts and checksums were validated;
+- bytecode compilation passed;
+- no new benchmark source line exceeded the configured 100-character limit.
+
+This verification does not establish that the MLX backend works correctly on the target M2. It establishes the CPU-tested benchmark infrastructure that the target run will use.
+
+## M2 competitive preset
+
+`examples/m2-competitive.yaml` defines a controlled 23,213,056-parameter resident workload:
+
+- 6 Transformer blocks;
+- hidden size 512;
+- 8 attention heads;
+- vocabulary 8,192;
+- sequence length 128;
+- microbatch 1;
+- dropout disabled;
+- MPS target;
+- 8 GB unified-memory system model.
+
+The tiny configuration remains the first smoke test. The competitive preset is intended to reduce the fraction of time dominated by framework startup and compilation overhead.
 
 ## Competitive validation gate
 
@@ -221,6 +269,7 @@ Every accepted comparison records:
 - first-step and steady-state latency;
 - tokens per second;
 - process footprint, framework memory counters, available memory, pressure, and swap;
+- final parameter tensor differences;
 - storage bytes and SSD writes when storage is involved;
 - numerical distance from the reference.
 
@@ -230,14 +279,14 @@ An optimization is accepted only when it improves a declared objective without v
 
 The next target-hardware run should:
 
-1. install the `benchmark` extra on the clean M2 checkout;
-2. run PyTorch MPS without activation checkpointing;
-3. run PyTorch MPS with activation checkpointing;
-4. run the uncompiled MLX backend with the same configuration;
-5. compare initial-state and batch checksums;
-6. compare loss trajectories and throughput;
+1. start from a clean checkout of version 0.3.1 or later;
+2. install the `benchmark` extra;
+3. run the tiny PyTorch MPS, checkpointed PyTorch MPS, and MLX smoke tests;
+4. compare initial-state, batch, and final-state artifacts;
+5. run the same three variants with `examples/m2-competitive.yaml`;
+6. compare loss trajectories, final tensors, throughput, memory pressure, and swap;
 7. inspect framework memory values together with macOS pressure and swap;
-8. preserve all JSON artifacts and exact versions;
+8. preserve JSON and `.state.npz` artifacts with exact versions;
 9. leave the source tree clean.
 
-No backend decision should be made before those results exist.
+No backend decision should be made before those results exist. No out-of-core claim should be made before storage-backed execution exists.
