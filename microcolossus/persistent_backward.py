@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import math
 import time
 from pathlib import Path
 
@@ -23,11 +22,11 @@ from .bounded_backward import (
     _gradient_map,
     _gradient_payload,
     _group_input_activation,
-    _payload_digest as _gradient_payload_digest,
     _read_all_gradients,
     _resident_gradient_trace,
     _stream_gradient_norm,
 )
+from .bounded_backward import _payload_digest as _gradient_payload_digest
 from .bounded_forward import (
     WorkingSetExceededError,
     _activation_bytes,
