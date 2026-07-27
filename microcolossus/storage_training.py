@@ -6,9 +6,10 @@ import gc
 import hashlib
 import math
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import Tensor, nn
@@ -132,7 +133,11 @@ def _digest_rows(payloads: tuple[TensorPayload, ...]) -> list[dict[str, Any]]:
 
 
 def _subset_checksum(rows: list[dict[str, Any]], prefix: str) -> str:
-    selected = [row for row in rows if str(row["key"]).split(":", 1)[1].startswith(prefix)]
+    selected = [
+        row
+        for row in rows
+        if str(row["key"]).split(":", 1)[1].startswith(prefix)
+    ]
     return sha256_hex(canonical_json_bytes(selected))
 
 
@@ -147,6 +152,16 @@ def state_digest(payloads: tuple[TensorPayload, ...]) -> StateDigest:
     )
 
 
+def _tensor_bytes(tensor: Tensor) -> bytes:
+    value = tensor.detach().cpu().contiguous()
+    if value.numel() == 0:
+        return b""
+    byte_view = value.reshape(-1).view(torch.uint8)
+    storage = bytes(cast(Iterable[int], byte_view.untyped_storage()))
+    start = byte_view.storage_offset()
+    return storage[start : start + byte_view.numel()]
+
+
 def batch_checksum(input_ids: Tensor, targets: Tensor) -> str:
     digest = hashlib.sha256()
     for name, tensor in (("input_ids", input_ids), ("targets", targets)):
@@ -154,7 +169,7 @@ def batch_checksum(input_ids: Tensor, targets: Tensor) -> str:
         digest.update(name.encode("utf-8"))
         digest.update(str(value.dtype).encode("ascii"))
         digest.update(str(tuple(value.shape)).encode("ascii"))
-        digest.update(value.view(torch.uint8).numpy().tobytes())
+        digest.update(_tensor_bytes(value))
     return digest.hexdigest()
 
 
@@ -177,6 +192,17 @@ def _new_pytorch_state(
         weight_decay=config.training.weight_decay,
     )
     return model, optimizer
+
+
+def _release_accelerator(device: torch.device) -> None:
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        empty_cache = getattr(torch.mps, "empty_cache", None)
+        if callable(empty_cache):
+            empty_cache()
+    synchronize_accelerator(device)
 
 
 def run_observed_pytorch_step(
@@ -288,10 +314,9 @@ def compare_states(
             if not torch.equal(left_tensor, right_tensor):
                 mismatches.append(f"value:{name}")
             continue
-        left_value = left_tensor.to(torch.complex128 if left_tensor.is_complex() else torch.float64)
-        right_value = right_tensor.to(
-            torch.complex128 if right_tensor.is_complex() else torch.float64
-        )
+        comparison_dtype = torch.complex128 if left_tensor.is_complex() else torch.float64
+        left_value = left_tensor.to(comparison_dtype)
+        right_value = right_tensor.to(comparison_dtype)
         finite = bool(
             torch.isfinite(left_value).all().item()
             and torch.isfinite(right_value).all().item()
@@ -407,6 +432,24 @@ def run_observable_storage_step(
     resident_model, resident_optimizer = _new_pytorch_state(config, device)
     restore_pytorch_state(resident_model, initial_payloads, resident_optimizer)
     initial_materialization_seconds = time.perf_counter() - materialization_started
+    del initial_payloads
+    gc.collect()
+
+    seed_everything(config.training.seed + 2)
+    resident_compute = run_observed_pytorch_step(
+        model=resident_model,
+        optimizer=resident_optimizer,
+        input_ids=input_ids.clone(),
+        targets=targets.clone(),
+        device=device,
+        gradient_clip_norm=config.training.gradient_clip_norm,
+    )
+    export_started = time.perf_counter()
+    resident_final_payloads = export_pytorch_state(resident_model, resident_optimizer)
+    resident_export_seconds = time.perf_counter() - export_started
+    resident_final_digest = state_digest(resident_final_payloads)
+    del resident_model, resident_optimizer
+    _release_accelerator(device)
 
     storage_payloads, read_metrics = _read_canonical_state(
         store, initial_commit.manifest.manifest_id
@@ -417,15 +460,10 @@ def run_observable_storage_step(
     storage_materialization_seconds = (
         time.perf_counter() - storage_materialization_started
     )
+    del storage_payloads
+    gc.collect()
 
-    resident_compute = run_observed_pytorch_step(
-        model=resident_model,
-        optimizer=resident_optimizer,
-        input_ids=input_ids.clone(),
-        targets=targets.clone(),
-        device=device,
-        gradient_clip_norm=config.training.gradient_clip_norm,
-    )
+    seed_everything(config.training.seed + 2)
     storage_compute = run_observed_pytorch_step(
         model=storage_model,
         optimizer=storage_optimizer,
@@ -434,14 +472,9 @@ def run_observable_storage_step(
         device=device,
         gradient_clip_norm=config.training.gradient_clip_norm,
     )
-
-    export_started = time.perf_counter()
-    resident_final_payloads = export_pytorch_state(resident_model, resident_optimizer)
-    resident_export_seconds = time.perf_counter() - export_started
     export_started = time.perf_counter()
     storage_final_payloads = export_pytorch_state(storage_model, storage_optimizer)
     storage_export_seconds = time.perf_counter() - export_started
-    resident_final_digest = state_digest(resident_final_payloads)
     storage_final_digest = state_digest(storage_final_payloads)
     resident_vs_storage = compare_states(
         resident_final_payloads, storage_final_payloads
@@ -453,12 +486,15 @@ def run_observable_storage_step(
     )
     update_transaction.put_many(storage_final_payloads)
     updated_commit = update_transaction.commit()
+    del storage_model, storage_optimizer
+    _release_accelerator(device)
 
     restored_payloads, restored_read = _read_canonical_state(
         store, updated_commit.manifest.manifest_id
     )
     restored_model, restored_optimizer = _new_pytorch_state(config, device)
     restore_pytorch_state(restored_model, restored_payloads, restored_optimizer)
+    del restored_payloads
     export_started = time.perf_counter()
     restored_final_payloads = export_pytorch_state(restored_model, restored_optimizer)
     restored_export_seconds = time.perf_counter() - export_started
