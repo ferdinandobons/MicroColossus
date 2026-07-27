@@ -5,9 +5,6 @@ on:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -37,43 +34,6 @@ jobs:
           name: mypy-${{ matrix.python-version }}
           path: mypy-${{ matrix.python-version }}.txt
           if-no-files-found: error
-      - name: Release final loss graph on the PR branch
-        if: matrix.python-version == '3.11' && github.event_name == 'pull_request'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          git fetch origin "$HEAD_REF"
-          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("microcolossus/bounded_backward.py")
-          text = path.read_text()
-          old = (
-              "            bounded_loss = float(loss.detach().cpu().item())\n"
-              "            output_activation_bytes = _activation_bytes(output)\n"
-              "        elif spec.name.startswith(\"block-\"):\n"
-          )
-          new = (
-              "            bounded_loss = float(loss.detach().cpu().item())\n"
-              "            output_activation_bytes = _activation_bytes(output)\n"
-              "            del loss\n"
-              "        elif spec.name.startswith(\"block-\"):\n"
-          )
-          if old not in text:
-              if "            del loss\n        elif spec.name.startswith" in text:
-                  raise SystemExit(0)
-              raise SystemExit("bounded-backward loss-release target not found")
-          path.write_text(text.replace(old, new, 1))
-          PY
-          if git diff --quiet; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add microcolossus/bounded_backward.py
-          git commit -m "Release the final backward graph between groups"
-          git push origin "HEAD:$HEAD_REF"
       - name: Test
         run: python -m pytest
       - name: Compile
