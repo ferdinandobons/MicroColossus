@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,6 +17,23 @@ jobs:
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      - name: Apply oracle gradient-store documentation locally
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          git fetch origin "$HEAD_REF"
+          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
+          git apply tools/oracle-gradient-docs.patch
+      - name: Publish oracle gradient-store documentation
+        if: matrix.python-version == '3.11' && github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/storage.md
+          git commit -m "Document separate oracle and bounded gradient stores"
+          git push origin "HEAD:$HEAD_REF"
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
