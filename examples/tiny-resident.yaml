@@ -1,0 +1,30 @@
+name: tiny-resident
+output_dir: runs/tiny-resident
+
+model:
+  vocab_size: 256
+  max_sequence_length: 128
+  layers: 2
+  heads: 4
+  hidden_size: 128
+  mlp_ratio: 4
+  dropout: 0.0
+  norm_epsilon: 0.00001
+  tie_embeddings: true
+
+training:
+  mode: reference
+  steps: 3
+  micro_batch_size: 2
+  sequence_length: 32
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  seed: 42
+  device: auto
+
+hardware:
+  vram_gib: 8.0
+  process_ram_gib: 5.0
+  nvme_gib: 100.0
+  ssd_write_budget_tb: 100.0

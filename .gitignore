@@ -32,3 +32,6 @@ checkpoints/
 .env
 .env.*
 !.env.example
+.coverage
+htmlcov/
+*.prof

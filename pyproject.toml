@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microcolossus"
+version = "0.1.0"
+description = "Experimental strict-budget training runtime for models larger than local RAM and VRAM."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Ferdinando Bonsegna" }
+]
+dependencies = [
+  "torch>=2.2",
+  "PyYAML>=6.0",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.11",
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+microcolossus = "microcolossus.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["microcolossus*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true

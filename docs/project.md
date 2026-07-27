@@ -2,50 +2,46 @@
 
 > **Trade memory for time.**
 
-## 1. Purpose and status
+This is the canonical description of why MicroColossus exists, what it aims to build, what is implemented, and how future claims must be validated.
 
-MicroColossus is an experimental open-source runtime for training generative models whose complete training state does not fit in the available GPU memory or the RAM budget of the host process.
+## 1. Purpose
 
-The project explores whether explicit scheduling across VRAM, RAM, and NVMe storage can replace part of the resident-memory requirement with additional data movement, recomputation, and elapsed time.
+MicroColossus is an experimental open-source runtime project for training generative models whose complete training state does not fit in GPU memory or within a strict host-RAM budget.
 
-This document defines the motivation, intended scope, system model, architecture, validation strategy, and development path.
+The project investigates whether explicit scheduling across VRAM, RAM, and NVMe can exchange part of the resident-memory requirement for additional data movement, recomputation, and elapsed time.
 
-> **Current status:** design specification only. The runtime has not been implemented, and no performance or model-scale result is claimed.
+The central question is:
+
+> How can a runtime execute a valid full-parameter update when the complete model state fits only in storage, while active computation remains inside strict VRAM and RAM budgets?
+
+MicroColossus does not claim that hardware limits disappear. Storage capacity, minimum tile size, total compute, PCIe bandwidth, NVMe throughput, CPU performance, and SSD endurance remain physical constraints.
 
 ## 2. Why the project exists
 
-The practical size of a trainable model is constrained by much more than the storage needed for its weights. A full training step may require:
+Training requires more than model weights. A full step may also require:
 
-- model weights used by forward and backward execution;
 - gradients;
-- optimizer states, such as Adam first and second moments;
+- optimizer states;
 - optional master-weight copies;
-- saved activations or the information needed to recompute them;
-- temporary tensors, logits, communication buffers, and kernel workspaces;
-- runtime and allocator overhead.
+- saved activations or recomputation metadata;
+- logits and loss intermediates;
+- temporary tensors and kernel workspaces;
+- allocator, framework, driver, and runtime overhead.
 
-A common mixed-precision AdamW configuration can require roughly 16 bytes or more of persistent state per trainable parameter before activations are counted. The exact amount depends on precision, optimizer, implementation, and memory layout. The following values are therefore illustrative, not universal limits.
+A mixed-precision AdamW layout is often approximated at roughly 16 bytes or more of persistent state per trainable parameter before activations. The exact value depends on dtype, optimizer, implementation, and layout. These values are illustrative, not universal limits.
 
-| Parameter count | Illustrative persistent state at 16 bytes per parameter |
+| Parameters | Illustrative persistent state at 16 bytes per parameter |
 |---:|---:|
 | 124 million | about 2.0 GB |
 | 350 million | about 5.6 GB |
 | 1 billion | about 16 GB |
 | 7 billion | about 112 GB |
 
-On a small machine, the full state may fit on an SSD while being far too large for VRAM or process RAM. Conventional execution often treats that mismatch as a hard capacity failure.
-
-MicroColossus treats it as a scheduling problem.
-
-The central research question is:
-
-> How can the runtime execute a valid full-parameter update when the complete model state fits only in storage, while the active computation must remain within strict VRAM and RAM budgets?
-
-The project is based on the view that memory capacity, data movement, recomputation, storage endurance, and elapsed time should be optimized together rather than considered separately.
+A small computer may have enough storage for this state but not enough VRAM or process RAM to keep it resident. MicroColossus treats that mismatch as a scheduling problem whose full cost must be measured.
 
 ## 3. Central hypothesis
 
-For a useful class of Transformer models and training recipes, a meaningful part of resident-memory demand may be exchanged for:
+For a useful class of Transformer models and training recipes, part of resident-memory demand may be exchanged for:
 
 - tensor streaming;
 - bounded caching;
@@ -53,9 +49,7 @@ For a useful class of Transformer models and training recipes, a meaningful part
 - layer-wise execution;
 - intra-layer tiling;
 - asynchronous prefetch and writeback;
-- additional training time.
-
-The system should preserve a full-parameter reference path whose update semantics remain comparable with an ordinary resident implementation, within documented floating-point tolerances.
+- additional elapsed time.
 
 The basic capacity constraints are:
 
@@ -69,113 +63,61 @@ RAM cache + staging buffers + runtime overhead
     <= configured process RAM budget
 ```
 
-Meeting these inequalities is necessary but not sufficient. A viable runtime must also manage bandwidth, latency, CPU work, SSD writes, failure recovery, and numerical behavior.
+These inequalities are necessary but not sufficient. A viable plan must also account for bandwidth, latency, CPU work, write amplification, endurance, numerical behavior, and failure recovery.
 
-## 4. What MicroColossus aims to achieve
+## 4. Goals and boundaries
 
-The project aims to build a runtime that can:
+MicroColossus aims to:
 
-1. Train models whose complete state exceeds both VRAM and the RAM budget of the process.
-2. Apply hard limits to VRAM, RAM, NVMe capacity, and cumulative SSD writes.
+1. Train models whose complete state exceeds both VRAM and the configured process-RAM budget.
+2. Apply explicit limits to VRAM, RAM, NVMe capacity, and cumulative SSD writes.
 3. Keep only the current working set in GPU memory.
-4. Stream tensor chunks between NVMe, host RAM, and VRAM using bounded buffers.
-5. Recompute selected activations instead of storing them.
-6. Divide a single layer into smaller tiles when the complete layer cannot fit in VRAM.
-7. Separate a reference full-parameter mode from approximate or parameter-efficient modes.
-8. Record where every tensor version lives and when it is valid.
-9. Recover from interrupted writes or process failure without silently publishing a partial training step.
-10. Report the real cost of the strategy in time, I/O, memory, energy where measurable, and SSD endurance.
+4. Stream tensor chunks through bounded buffers.
+5. Recompute selected activations instead of retaining them.
+6. Tile a single operation when it cannot fit in VRAM as a whole.
+7. Preserve a clearly identified full-parameter reference path.
+8. Track the identity, version, location, and integrity of managed tensor chunks.
+9. Avoid publishing partially completed optimizer steps.
+10. Report time, I/O, memory use, stalls, and SSD writes.
 
-The initial hardware target is intentionally restrictive:
+It does not promise:
+
+- literally infinite models;
+- datacenter-class throughput;
+- initial support for arbitrary PyTorch graphs;
+- feasibility for every architecture or context length;
+- elimination of total training compute;
+- unmanaged use of swap or unmeasured page-cache behavior;
+- that offloading, checkpointing, or tensor streaming are new ideas;
+- success at scale targets before measured demonstrations exist.
+
+A larger parameter count alone is not sufficient evidence of success.
+
+## 5. Initial target and modes
+
+The first constrained-hardware target is:
 
 - one CUDA GPU with 8 GB of VRAM;
 - 8 GB of installed system RAM;
-- a process RAM budget lower than installed RAM, leaving space for the operating system and drivers;
+- a process budget below installed RAM;
 - one consumer NVMe SSD;
-- no requirement for a distributed cluster.
+- no distributed cluster;
+- a controlled decoder-only Transformer.
 
-## 5. What the project does not promise
+Planned modes are kept separate:
 
-MicroColossus is not intended to provide:
+- **`reference`**: all parameters are trainable. No silent adapters, low-rank gradient projections, or quantized optimizer states.
+- **`compact`**: future mode for declared approximations such as quantized optimizer states or low-rank methods.
+- **`adapter`**: future LoRA or QLoRA path, reported separately from full-parameter training.
 
-- literally infinite model size;
-- throughput comparable with a well-provisioned multi-GPU cluster;
-- support for every PyTorch model and operator in the first implementation;
-- automatic feasibility for every architecture or context length;
-- a way to avoid the total compute cost of training;
-- unmanaged reliance on swap or the operating system page cache;
-- a claim that offloading, checkpointing, quantization, or tensor streaming are new ideas;
-- guaranteed success at the proposed 350 million or 1 billion parameter milestones.
+Only `reference` is currently accepted by the configuration loader.
 
-Storage capacity, minimum tile size, total floating-point work, PCIe bandwidth, NVMe throughput, CPU performance, and SSD endurance remain physical limits.
-
-## 6. Design principles
-
-### 6.1 Memory is an explicit hierarchy
-
-VRAM, host RAM, and NVMe are separate tiers with different capacity, bandwidth, latency, and endurance characteristics. The runtime should model them explicitly.
-
-### 6.2 Every tensor is accounted for
-
-For every managed tensor or chunk, the runtime should know:
-
-- logical identity;
-- shape and data type;
-- current version;
-- authoritative location;
-- cached locations;
-- checksum or integrity metadata;
-- next expected use;
-- whether it may be discarded and recomputed.
-
-### 6.3 Budgets are hard constraints
-
-A plan that exceeds configured VRAM or RAM is invalid, even if it would probably succeed on a particular run. Memory safety should not depend on optimistic allocator behavior.
-
-### 6.4 Reference and approximate execution remain distinct
-
-A reference mode should prioritize complete parameter updates and documented numerical comparison. Quantized optimizer states, low-rank projections, gradient compression, LoRA, and similar methods belong to separately named modes.
-
-### 6.5 Storage writes are part of the cost model
-
-An approach that fits in memory but writes an impractical amount of data per step is not considered successful. Write amplification and estimated endurance consumption should be visible metrics.
-
-### 6.6 Correctness precedes scale claims
-
-The first important result is not the largest model. It is a runtime that can explain where each tensor lives, which version is valid, how it was produced, and how closely the update matches a resident baseline.
-
-## 7. Planned training modes
-
-### `reference`
-
-All model parameters are trainable. The mode is intended to use full gradients and conventional optimizers such as AdamW or SGD, combined with activation checkpointing, offloading, and mathematically equivalent tiling where practical.
-
-This mode must not silently introduce adapters, low-rank gradient projections, or quantized optimizer states.
-
-### `compact`
-
-This mode may use memory-reducing methods such as:
-
-- quantized optimizer states;
-- compressed gradients;
-- reduced-rank optimizer methods;
-- alternative optimizer representations;
-- other explicitly documented approximations.
-
-Every deviation from `reference` should be identified and benchmarked separately.
-
-### `adapter`
-
-A future mode for LoRA, QLoRA, and related parameter-efficient fine-tuning methods. Adapter training is useful, but it is not equivalent to full-parameter pretraining or full fine-tuning.
-
-## 8. Proposed architecture
+## 6. Proposed architecture
 
 ```text
 Dataset stream
       |
 Controlled model frontend
-      |
-Graph and tensor analysis
       |
 Budget-aware planner
       |
@@ -183,390 +125,262 @@ Execution schedule
       |
 +----------------------------------+
 | Runtime                          |
-|                                  |
-|  Executor                        |
-|  Transfer engine                 |
-|  Activation manager              |
-|  Optimizer engine                |
-|  Checkpoint coordinator          |
-|  Telemetry engine                |
+| - executor                       |
+| - transfer engine                |
+| - activation manager             |
+| - optimizer engine               |
+| - checkpoint coordinator         |
+| - telemetry                      |
 +----------------------------------+
       |
 VRAM cache <-> RAM cache <-> NVMe tensor store
 ```
 
-### Controlled model frontend
+The intended components are:
 
-The first implementation should support a deliberately limited decoder-only Transformer. A narrow frontend reduces ambiguity and makes numerical validation practical. Broader PyTorch integration can be added only after the core runtime is stable.
+- a controlled frontend with a deliberately small operator set;
+- a tensor manifest with shape, dtype, version, location, and checksum;
+- a planner for tiling, prefetch, eviction, recomputation, and placement;
+- bounded VRAM and RAM caches;
+- an asynchronous transfer engine;
+- a chunked, versioned, recoverable NVMe tensor store;
+- layer-wise and tile-wise forward, backward, and optimizer execution;
+- telemetry for memory, transfers, stalls, throughput, and writes.
 
-### Tensor manifest
+## 7. Intended execution model
 
-The manifest is the control plane for tensor state. It records tensor identity, chunk layout, version, location, integrity information, and lifecycle metadata.
+### Forward
 
-### Budget-aware planner
-
-The planner selects:
-
-- layer and tensor tile sizes;
-- activation checkpoints;
-- recomputation points;
-- RAM and VRAM cache residency;
-- prefetch distance;
-- buffer count and size;
-- optimizer placement;
-- writeback timing.
-
-A schedule is accepted only when its predicted peak usage remains within all configured budgets.
-
-### Transfer engine
-
-The transfer engine is responsible for bounded and asynchronous movement between storage, host memory, and device memory. It should use preallocated buffers and a strictly limited amount of pinned memory.
-
-### Tensor store
-
-The NVMe tensor store holds authoritative chunk versions, optimizer state, manifests, journals, and checkpoints. It should support integrity checks and recovery after interruption.
-
-### Executor
-
-The executor performs forward, backward, gradient accumulation, and optimizer work according to the schedule. Execution may be layer-wise or tile-wise.
-
-### Telemetry engine
-
-Telemetry should expose:
-
-- peak allocated and reserved VRAM;
-- process resident memory;
-- page-cache effects where measurable;
-- bytes transferred over PCIe;
-- bytes read from and written to NVMe;
-- transfer and compute overlap;
-- GPU idle time;
-- I/O stalls;
-- write amplification;
-- step time and token throughput;
-- checkpoint and recovery time;
-- numerical differences from the baseline.
-
-## 9. Memory hierarchy
-
-### VRAM
-
-VRAM acts as the computation tier and fastest managed cache. It contains only the active parameter tiles, activations, gradients, and workspaces required by the current operation.
-
-### Host RAM
-
-Host RAM acts as a bounded cache and staging tier. It may hold prefetched chunks, evicted activations, transfer buffers, and limited optimizer data. The runtime must not assume that all model state can temporarily spill into RAM.
-
-### NVMe
-
-NVMe acts as the authoritative high-capacity tier for state that is not currently active. It may contain:
-
-- model parameter chunks;
-- gradient accumulation chunks;
-- optimizer state chunks;
-- activation spill data when selected by the planner;
-- tensor manifests;
-- write-ahead journals;
-- incremental checkpoints.
-
-The SSD is not treated as free memory. Its bandwidth, latency, and endurance are explicit constraints.
-
-## 10. Execution model
-
-### 10.1 Forward pass
-
-For each layer or tile, the runtime is expected to:
-
-1. Prefetch the required weights from NVMe into a bounded RAM buffer.
-2. Transfer the active data from RAM into VRAM.
+1. Prefetch the next layer or tile from NVMe to a bounded RAM buffer.
+2. Transfer the active weights to VRAM.
 3. Execute the GPU operation.
-4. Retain, offload, or discard the resulting activation according to the plan.
-5. Release or evict data that is no longer part of the near-term working set.
-6. Overlap the current computation with prefetch for the next operation when possible.
+4. Keep, offload, or discard the activation according to the plan.
+5. Release the working set before advancing.
 
-### 10.2 Backward pass
+### Backward
 
-In reverse order, the runtime is expected to:
+1. Reload the required weights.
+2. Recover or recompute the corresponding activations.
+3. Compute input and parameter gradients.
+4. Accumulate or write back gradients by chunk.
+5. Apply the optimizer update by tile.
+6. Publish the new tensor version only after its data is durable.
 
-1. Reload the required weights or tiles.
-2. Retrieve or recompute the associated activations.
-3. Calculate input and parameter gradients.
-4. Accumulate gradients in bounded chunks.
-5. Run the optimizer update on the CPU or GPU according to the plan.
-6. Write the next tensor version without invalidating the previous committed version.
-7. Publish the completed step atomically after all required chunks are valid.
+### Intra-layer tiling
 
-### 10.3 Gradient accumulation
+Layer streaming is insufficient when one matrix, embedding, output head, or attention operation is larger than VRAM. Planned tiled paths include:
 
-Microbatches may be used to reduce activation memory. Gradient accumulation reduces the resident batch requirement, but it does not by itself solve the problem of model state that cannot fit in memory. The runtime therefore manages accumulated gradients using the same chunked hierarchy.
+- linear projections and MLPs;
+- partitioned embeddings;
+- output projection and cross-entropy without all logits resident at once;
+- normalization and streaming reductions;
+- block-wise attention;
+- shared embedding/output weights;
+- reproducible dropout during recomputation.
 
-### 10.4 Activation policy
+The first tiled operator should be a linear layer because its forward and gradient equations can be decomposed and validated directly.
 
-For each activation, the planner may select one of four actions:
+## 8. Current implementation
 
-- keep in VRAM;
-- move to host RAM;
-- write to NVMe;
-- discard and recompute during backward execution.
+The repository now contains the executable foundation, not the out-of-core runtime.
 
-The decision should account for size, next-use distance, recomputation cost, transfer cost, and available budgets.
+Implemented:
 
-## 11. Intra-layer tiling
+- typed YAML configuration;
+- controlled decoder-only Transformer;
+- deterministic synthetic next-token data;
+- resident full-parameter AdamW training;
+- process-RAM and CUDA peak-allocation telemetry;
+- gradient norms and deterministic model-state checksums;
+- atomic JSON and JSONL experiment artifacts;
+- a static memory estimator;
+- CLI, tests, packaging, and CI.
 
-Layer streaming alone handles models that are deep but still assumes that one layer fits in VRAM. A sufficiently wide layer, embedding table, output head, or attention operation may violate that assumption.
+Not implemented:
 
-MicroColossus therefore plans to support tiling inside individual operations.
+- real RAM-to-VRAM layer streaming;
+- NVMe-backed tensors or optimizer state;
+- activation offloading or managed recomputation;
+- asynchronous transfers;
+- hard runtime budget enforcement;
+- intra-layer tiling;
+- tensor manifests, journals, or crash recovery;
+- resident-versus-streamed numerical comparison;
+- training state larger than resident memory.
 
-### Linear and MLP operations
+Current commands:
 
-Weight matrices can be divided by output features, input features, or two-dimensional blocks. Partial outputs and gradients must be accumulated without materializing the complete weight matrix in VRAM.
-
-### Embeddings
-
-Large embedding tables can be partitioned into chunks. The runtime must load only partitions referenced by the current token batch, while preserving correct gradient accumulation for repeated token IDs.
-
-### Output head and loss
-
-The runtime should avoid materializing all vocabulary logits at once when the output projection is too large. A tiled cross-entropy path may compute numerically stable reductions across vocabulary blocks.
-
-### Attention
-
-Attention should use blockwise execution and avoid storing unnecessary intermediate matrices. The implementation should distinguish standard efficient attention kernels from the separate problem of moving model state through the memory hierarchy.
-
-### Normalization and reductions
-
-Layer normalization and other reductions may require streaming accumulation of statistics across tiles. Numerical stability and operation ordering must be validated against the baseline.
-
-### Shared weights and randomness
-
-Weight tying between embeddings and the output head requires consistent version handling. Dropout and other random operations require reproducible random-number state during activation recomputation.
-
-## 12. Planner and cost model
-
-A representative configuration may look like this:
-
-```yaml
-hardware:
-  vram_budget_gib: 7.0
-  ram_budget_gib: 5.0
-  nvme_budget_gib: 500
-  ssd_write_budget_tb: 300
-
-training:
-  mode: reference
-  micro_batch_size: 1
-  sequence_length: 1024
-  gradient_accumulation_steps: 8
-
-planner:
-  objective: min_step_time
-  enforce_hard_budgets: true
-  account_page_cache: true
+```bash
+microcolossus plan --config examples/tiny-resident.yaml
+microcolossus train --config examples/tiny-resident.yaml
+python -m pytest
 ```
 
-The exact configuration format may change during implementation.
-
-An idealized lower bound for step time is:
+The training command writes:
 
 ```text
-step_time >= max(
-    step_flops / sustained_gpu_throughput,
-    pcie_bytes / sustained_pcie_bandwidth,
-    nvme_bytes / sustained_nvme_bandwidth,
-    optimizer_work / sustained_cpu_throughput
-)
+runs/tiny-resident/
+  resolved-config.json
+  memory-plan.json
+  steps.jsonl
+  summary.json
 ```
 
-This expression assumes perfect overlap. Real execution will include synchronization, small-transfer overhead, dependency gaps, filesystem behavior, and other inefficiencies.
+The workload is synthetic. It validates infrastructure and repeatability, not model quality.
 
-The planner should optimize more than step time. Candidate objectives include:
+### Static planner limitations
 
-- minimum step time under hard memory limits;
-- minimum SSD writes under a maximum step-time constraint;
-- maximum model size under memory and endurance limits;
-- minimum energy per token where reliable measurement is available.
+The planner calculates parameter, gradient, and Adam-state sizes from the instantiated model. Activation, workspace, transfer-buffer, and streamed-working-set values are heuristics.
 
-The planner should reject schedules that fit capacity but exceed configured write or time limits.
+It does not yet model:
 
-## 13. Storage, consistency, and recovery
+- allocator fragmentation;
+- page cache and pinned-memory overhead;
+- exact operator workspaces;
+- transfer/compute overlap;
+- PCIe or NVMe latency;
+- SSD write amplification;
+- runtime-measured tensor lifetimes.
 
-The tensor store should be chunked so that large tensors can be read, updated, and checksummed incrementally.
+Its output is a planning hypothesis, not a guarantee that a run will fit.
 
-The planned consistency model includes:
+## 9. Validation contract
 
-- immutable or copy-on-write tensor chunks;
+Correctness precedes scale.
+
+The resident implementation is the numerical oracle. A future streamed path must use the same:
+
+- initial parameters;
+- batches;
+- random seeds;
+- optimizer configuration;
+- data types;
+- gradient-accumulation schedule.
+
+Comparisons must include:
+
+- forward loss;
+- selected activations;
+- gradients;
+- optimizer states;
+- parameters after each update;
+- the trajectory across multiple steps.
+
+Floating-point differences must be measured with documented tolerances. Approximate equality must not be described as exact equality.
+
+A streamed run must also report configured budgets, measured VRAM, process RSS, transfer buffers, and every budget violation.
+
+## 10. Storage and recovery requirements
+
+The future tensor store should use:
+
+- immutable chunks or copy-on-write versions;
 - logical tensor versions;
+- per-chunk checksums;
 - a write-ahead journal;
-- per-chunk integrity checks;
 - atomic manifest publication;
 - incremental checkpoints;
 - failure-injection tests.
 
-A training step is committed only after every required chunk and the manifest for the new logical version have been written successfully. Until that point, the previous committed version remains authoritative.
+A step is committed only after all required chunks and the new manifest are valid. Until then, the previous committed version remains authoritative.
 
-Recovery should be able to distinguish:
+Recovery must distinguish committed steps, unpublished complete writes, partial writes, corrupt chunks, and stale cache entries.
 
-- fully committed steps;
-- complete but unpublished writes;
-- partial chunk writes;
-- corrupt chunks;
-- stale cache entries.
+## 11. Roadmap
 
-## 14. Validation strategy
+### M0. Executable foundation. Implemented
 
-The project should establish correctness before pursuing scale.
+- package, configuration, and CLI;
+- controlled model;
+- resident training baseline;
+- static planner;
+- telemetry and artifacts;
+- reproducibility tests and CI.
 
-### Resident baseline
+### M1. RAM-to-VRAM layer streaming. Next
 
-A small model must run in a conventional resident PyTorch implementation. The streamed implementation should use the same:
+- define canonical CPU-owned model state;
+- execute one block at a time on the active device;
+- add deterministic recomputation where needed;
+- record transfers and residency transitions;
+- compare loss, gradients, AdamW state, and updated parameters;
+- measure and enforce a VRAM budget.
 
-- initial parameters;
-- input batches;
-- random seeds;
-- optimizer configuration;
-- data types;
-- gradient accumulation schedule.
+### M2. Versioned tensor store
 
-### Numerical comparisons
+- tensor/chunk identifiers and manifest;
+- checksums and copy-on-write versions;
+- journal and recovery tests;
+- read/write telemetry.
 
-Validation should compare:
+### M3. Synchronous NVMe execution
 
-- forward loss at each step;
-- selected activations;
-- parameter gradients;
-- optimizer states;
-- parameters after each update;
-- final training trajectory.
+- model and optimizer state in the tensor store;
+- bounded RAM staging buffers;
+- layer-wise forward and backward;
+- atomic step publication.
 
-Tolerance must be defined by operation and precision. Differences caused by changed floating-point reduction order should be measured rather than described as exact equivalence.
+### M4. Asynchronous overlap
 
-### Failure validation
+- double buffering;
+- prefetch and writeback;
+- stall measurement;
+- memory and write-budget rejection.
 
-Tests should terminate the process during:
+### M5. Intra-layer tiling
 
-- chunk writes;
-- manifest publication;
-- checkpoint creation;
-- optimizer updates;
-- cache eviction.
+- tiled linear and MLP paths;
+- partitioned embeddings;
+- tiled output projection and loss;
+- normalization and attention paths.
 
-After restart, the runtime should recover the last valid committed state or report an integrity failure clearly.
+### M6. Constrained-hardware demonstration
 
-## 15. Benchmark plan
+- validate around 124 million parameters;
+- attempt full-parameter training around 350 million parameters on the target class of hardware;
+- investigate around 1 billion parameters only after the smaller result is correct and measurable.
 
-Planned comparisons include:
+These scale targets are research goals, not current capabilities or guaranteed outcomes.
 
-- fully resident PyTorch;
-- PyTorch with activation checkpointing;
-- PyTorch with CPU offload where applicable;
-- DeepSpeed ZeRO-Offload;
-- DeepSpeed ZeRO-Infinity;
-- MicroColossus `reference`;
-- MicroColossus `compact`, reported separately.
+## 12. Benchmark and success criteria
 
-Core metrics include:
+Planned comparisons include resident PyTorch, activation checkpointing, applicable CPU offload, DeepSpeed ZeRO-Offload and ZeRO-Infinity, and separate MicroColossus modes.
 
-- peak VRAM usage;
-- peak process resident memory;
-- tokens per second;
-- seconds per training step;
-- GPU utilization;
-- I/O wait and GPU stall time;
-- PCIe bytes per step;
-- NVMe read and write bytes per step;
-- write amplification;
+Core metrics are:
+
+- peak VRAM and process RAM;
+- tokens per second and seconds per step;
+- GPU utilization and stall time;
+- PCIe and NVMe bytes;
+- SSD writes and write amplification;
 - checkpoint and recovery time;
 - numerical distance from the resident baseline;
-- energy per million tokens, when measurement is available.
+- energy per million tokens when measurable.
 
-Benchmark reports must state hardware, software versions, model architecture, sequence length, batch configuration, precision, optimizer, storage configuration, and thermal or power limits.
+The first meaningful streamed milestone requires:
 
-## 16. Minimum viable implementation
+1. configured VRAM and RAM budgets are respected;
+2. complete state exceeds at least one resident tier;
+3. the update is compared with the resident baseline;
+4. every tensor version is traceable;
+5. storage reads and writes are reported;
+6. interruption recovers the last committed state;
+7. the result is reproducible from a documented configuration.
 
-### Phase 0. Simulator
+## 13. Main risks
 
-Build a planner simulator without real training. It should model tensor sizes, dependencies, memory capacities, transfer bandwidth, latency, and SSD writes.
+- **I/O domination:** the GPU may remain idle while tensors move.
+- **SSD endurance:** optimizer state and gradients may create impractical write volume.
+- **Hidden RAM use:** page cache, pinned buffers, Python, drivers, and fragmentation may violate the budget.
+- **Untileable operations:** some kernels may have an irreducible or inefficient working set.
+- **Numerical divergence:** recomputation and changed reduction order may alter training.
+- **Complexity without utility:** a larger trainable model may still be too slow to be useful.
 
-### Phase 1. Numerical baseline
+Every benchmark must report these costs instead of presenting model size in isolation.
 
-Train a controlled decoder model around 124 million parameters in both resident and streamed forms. Compare losses, gradients, optimizer states, and parameters.
+## 14. Related work and proposed focus
 
-### Phase 2. Tensor store
-
-Implement chunking, manifests, checksums, journaling, recovery, and I/O telemetry.
-
-### Phase 3. Layer-wise streaming
-
-Place weights and optimizer states on NVMe, enforce a bounded RAM cache, and overlap transfers through double buffering.
-
-### Phase 4. Intra-layer tiling
-
-Add tiled linear layers, MLPs, embeddings, output projection, loss, normalization, and attention paths.
-
-### Phase 5. Constrained-hardware demonstration
-
-Attempt full-parameter training around 350 million parameters on an 8 GB GPU, strongly limited process RAM, and one consumer NVMe SSD.
-
-A model around 1 billion parameters is a stretch target to investigate after the smaller demonstration is correct and measurable.
-
-## 17. Success criteria
-
-The project reaches its first meaningful milestone when it can demonstrate all of the following:
-
-1. A streamed training run completes without exceeding configured VRAM and RAM budgets.
-2. The complete model state exceeds at least one resident-memory tier.
-3. The update trajectory is numerically compared with a resident baseline.
-4. Every managed tensor version is traceable through the manifest.
-5. Storage reads, writes, and write amplification are reported.
-6. A forced interruption can recover the last committed state.
-7. The result is reproducible from a documented configuration.
-
-Maximum parameter count alone is not a sufficient success metric.
-
-## 18. Main technical risks
-
-### I/O dominates execution
-
-Streaming may leave the GPU idle for most of the step. Mitigation requires large sequential chunks, asynchronous transfers, prefetching, and realistic planner models.
-
-### SSD endurance becomes unacceptable
-
-Optimizer states and gradients can generate large write volumes. The runtime must reduce unnecessary writeback, use incremental updates where valid, and expose projected endurance use.
-
-### Host RAM is consumed indirectly
-
-Pinned buffers, filesystem cache, Python overhead, drivers, and allocator fragmentation can violate the intended budget. Measurement must include process RSS and relevant operating-system effects.
-
-### A single operation cannot be tiled efficiently
-
-Some operations may have a minimum useful working set or poor tile-level efficiency. The controlled frontend should initially support only operations with validated tiled paths.
-
-### Numerical behavior diverges
-
-Changed reduction order, recomputation, and precision conversions may alter training. The project must publish tolerances and avoid describing approximate behavior as exact.
-
-### Complexity outweighs practical value
-
-A runtime that technically supports a larger model but trains at unusable speed may have limited value. Benchmarking must present throughput and total cost alongside model size.
-
-## 19. Proposed implementation stack
-
-The initial implementation is expected to use:
-
-- Python 3.11 or later;
-- PyTorch 2.x;
-- C++ and CUDA for critical paths;
-- `io_uring`, `libaio`, or another measured asynchronous I/O backend;
-- YAML for configuration;
-- JSONL or a similar append-friendly telemetry format;
-- pytest, Ruff, mypy, and pre-commit;
-- GitHub Actions for automated checks.
-
-These choices are provisional and should be validated against the actual runtime requirements.
-
-## 20. Related work
-
-MicroColossus builds on established research and engineering directions. Important references include:
+MicroColossus builds on established work, including:
 
 - [PyTorch activation checkpointing](https://docs.pytorch.org/docs/stable/checkpoint.html)
 - [ZeRO-Offload](https://arxiv.org/abs/2101.06840)
@@ -575,22 +389,22 @@ MicroColossus builds on established research and engineering directions. Importa
 - [GaLore](https://arxiv.org/abs/2403.03507)
 - [LoHan](https://arxiv.org/abs/2403.06504)
 
-The project does not present their underlying techniques as original. Its proposed focus is the combination of:
+The project does not present those underlying techniques as original.
 
-- an explicit target of very limited installed RAM as well as limited VRAM;
-- hard budgets across every memory tier;
-- NVMe as a canonical, versioned tensor store;
-- tiling inside a layer, not only between layers;
-- planning that accounts for elapsed time and SSD writes;
-- telemetry expressed in bytes per step and bytes per token;
-- crash recovery integrated into the execution model;
-- strict separation of `reference`, `compact`, and `adapter` modes.
+Its proposed focus is the combination of:
 
-This differentiation remains a project hypothesis until it is implemented, compared with existing systems, and evaluated experimentally.
+- very limited host RAM as well as limited VRAM;
+- explicit budgets across every memory tier;
+- NVMe as a versioned canonical tensor store;
+- tiling inside individual layers;
+- planning that includes elapsed time and SSD writes;
+- telemetry in bytes per step and bytes per token;
+- recovery integrated into execution;
+- strict separation between reference and approximate modes.
 
-## 21. Final project statement
+This differentiation remains a hypothesis until it is implemented and compared experimentally.
 
-MicroColossus is based on a simple trade:
+## 15. Project statement
 
 ```text
 less resident memory
@@ -598,4 +412,4 @@ less resident memory
 more I/O + more recomputation + more elapsed time
 ```
 
-The intended contribution is not a claim that hardware limits disappear. It is a runtime that makes those limits explicit, schedules around them where possible, and reports the full cost of doing so.
+The intended contribution is a runtime that makes memory limits explicit, schedules around them where practical, preserves a measurable reference path, and reports the complete cost of doing so.
