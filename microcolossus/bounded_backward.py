@@ -110,10 +110,13 @@ class BoundedBackwardResult:
     experiment: str
     device: str
     parameter_store_path: str
+    oracle_gradient_store_path: str
     gradient_store_path: str
     parameter_manifest_id: str
     parameter_manifest_checksum: str
+    oracle_gradient_manifest_id: str
     gradient_manifest_id: str
+    oracle_gradient_store_commit: StoreTelemetry
     parameter_count: int
     batch_checksum: str
     parameter_working_set_budget_bytes: int
@@ -124,6 +127,8 @@ class BoundedBackwardResult:
     gradient_budget_respected: bool
     retained_cpu_activations: bool
     retained_cpu_activation_bytes: int
+    resident_oracle_released_before_bounded: bool
+    bootstrap_payloads_released_before_bounded: bool
     full_gradient_state_materialized_for_validation: bool
     forward_groups: tuple[ForwardBoundaryMetrics, ...]
     backward_groups: tuple[BackwardGroupMetrics, ...]
@@ -132,6 +137,8 @@ class BoundedBackwardResult:
     bounded_loss: float
     loss_absolute_difference: float
     resident_gradient_norm: float
+    oracle_store_gradient_norm: float
+    oracle_store_norm_absolute_difference: float
     bounded_gradient_norm: float
     gradient_norm_absolute_difference: float
     future_clip_coefficient: float
@@ -149,6 +156,8 @@ class BoundedBackwardResult:
     parameter_manifest_unchanged: bool
     parameter_store_verified_tensor_count: int
     parameter_store_verified_chunk_count: int
+    oracle_gradient_store_verified_tensor_count: int
+    oracle_gradient_store_verified_chunk_count: int
     gradient_store_verified_tensor_count: int
     gradient_store_verified_chunk_count: int
     gradient_versions: tuple[tuple[str, int], ...]
@@ -385,24 +394,31 @@ def _commit_group_gradients(
     return result.telemetry, tuple(payloads)
 
 
-def _stream_gradient_norm(
-    store: VersionedTensorStore,
-) -> tuple[float, tuple[TensorPayload, ...]]:
+def _stream_gradient_norm(store: VersionedTensorStore) -> float:
     squared_norms: list[float] = []
-    payloads: list[TensorPayload] = []
     for record in sorted(store.current_manifest().tensors, key=lambda item: item.logical_name):
         payload = store.read_tensor(record.tensor_id)
         value = payload_to_torch(payload).float()
         squared_norms.append(float(value.pow(2).sum().item()))
-        payloads.append(payload)
-        del value
-    return math.sqrt(math.fsum(squared_norms)), tuple(payloads)
+        del value, payload
+    return math.sqrt(math.fsum(squared_norms))
+
+
+def _read_all_gradients(store: VersionedTensorStore) -> tuple[TensorPayload, ...]:
+    return tuple(
+        store.read_tensor(record.tensor_id)
+        for record in sorted(
+            store.current_manifest().tensors,
+            key=lambda item: item.logical_name,
+        )
+    )
 
 
 def run_bounded_backward(
     config: ExperimentConfig,
     *,
     parameter_store_path: str | Path,
+    oracle_gradient_store_path: str | Path,
     gradient_store_path: str | Path,
     output_path: str | Path | None = None,
     device_override: str | None = None,
@@ -418,10 +434,16 @@ def run_bounded_backward(
     if gradient_working_set_bytes <= 0:
         raise ValueError("gradient_working_set_bytes must be greater than zero")
     parameter_destination = Path(parameter_store_path)
+    oracle_gradient_destination = Path(oracle_gradient_store_path)
     gradient_destination = Path(gradient_store_path)
     if parameter_destination.exists():
         raise FileExistsError(
             f"bounded-backward requires a new parameter store: {parameter_destination}"
+        )
+    if oracle_gradient_destination.exists():
+        raise FileExistsError(
+            "bounded-backward requires a new oracle gradient store: "
+            f"{oracle_gradient_destination}"
         )
     if gradient_destination.exists():
         raise FileExistsError(
@@ -478,6 +500,22 @@ def run_bounded_backward(
         targets,
         device,
     )
+    oracle_gradient_store = VersionedTensorStore.create(
+        oracle_gradient_destination,
+        limits=StoreLimits(
+            chunk_size_bytes=parameter_store.limits.chunk_size_bytes,
+            max_storage_bytes=parameter_store.limits.max_storage_bytes,
+            max_staging_bytes=parameter_store.limits.max_staging_bytes,
+        ),
+    )
+    oracle_transaction = oracle_gradient_store.begin_transaction(committed_step=0)
+    oracle_transaction.put_many(resident.gradients)
+    oracle_commit = oracle_transaction.commit()
+    resident_loss = resident.loss
+    resident_gradient_norm = resident.gradient_norm
+    del resident, bootstrap_payloads
+    gc.collect()
+
     activations, bounded_forward_loss, forward_metrics = _bounded_forward_activations(
         config,
         parameter_store,
@@ -488,8 +526,6 @@ def run_bounded_backward(
         targets,
         device,
     )
-    del bootstrap_payloads
-    gc.collect()
 
     gradient_store = VersionedTensorStore.create(
         gradient_destination,
@@ -645,12 +681,16 @@ def run_bounded_backward(
             )
         )
 
-    bounded_gradient_norm, bounded_gradients = _stream_gradient_norm(gradient_store)
-    resident_vs_bounded = compare_states(resident.gradients, bounded_gradients)
+    oracle_store_gradient_norm = _stream_gradient_norm(oracle_gradient_store)
+    bounded_gradient_norm = _stream_gradient_norm(gradient_store)
+    oracle_gradients = _read_all_gradients(oracle_gradient_store)
+    bounded_gradients = _read_all_gradients(gradient_store)
+    resident_vs_bounded = compare_states(oracle_gradients, bounded_gradients)
     gradient_manifest = gradient_store.current_manifest()
     tied_record = _gradient_map(gradient_manifest.tensors)["model.token_embedding.weight"]
     parameter_after = parameter_store.current_manifest()
     parameter_verification = parameter_store.verify()
+    oracle_gradient_verification = oracle_gradient_store.verify()
     gradient_verification = gradient_store.verify()
     max_norm = config.training.gradient_clip_norm
     future_clip_coefficient = (
@@ -670,10 +710,13 @@ def run_bounded_backward(
         experiment=config.name,
         device=str(device),
         parameter_store_path=str(parameter_destination),
+        oracle_gradient_store_path=str(oracle_gradient_destination),
         gradient_store_path=str(gradient_destination),
         parameter_manifest_id=parameter_manifest.manifest_id,
         parameter_manifest_checksum=parameter_manifest.manifest_checksum,
+        oracle_gradient_manifest_id=oracle_commit.manifest.manifest_id,
         gradient_manifest_id=gradient_manifest.manifest_id,
+        oracle_gradient_store_commit=oracle_commit.telemetry,
         parameter_count=parameter_count,
         batch_checksum=data_checksum,
         parameter_working_set_budget_bytes=parameter_working_set_bytes,
@@ -684,17 +727,23 @@ def run_bounded_backward(
         gradient_budget_respected=maximum_gradient_group_bytes <= gradient_working_set_bytes,
         retained_cpu_activations=True,
         retained_cpu_activation_bytes=retained_activation_bytes,
+        resident_oracle_released_before_bounded=True,
+        bootstrap_payloads_released_before_bounded=True,
         full_gradient_state_materialized_for_validation=True,
         forward_groups=forward_metrics,
         backward_groups=tuple(backward_metrics),
         backward_group_order=tuple(item.name for item in backward_metrics),
-        resident_loss=resident.loss,
+        resident_loss=resident_loss,
         bounded_loss=bounded_loss,
-        loss_absolute_difference=abs(resident.loss - bounded_loss),
-        resident_gradient_norm=resident.gradient_norm,
+        loss_absolute_difference=abs(resident_loss - bounded_loss),
+        resident_gradient_norm=resident_gradient_norm,
+        oracle_store_gradient_norm=oracle_store_gradient_norm,
+        oracle_store_norm_absolute_difference=abs(
+            resident_gradient_norm - oracle_store_gradient_norm
+        ),
         bounded_gradient_norm=bounded_gradient_norm,
         gradient_norm_absolute_difference=abs(
-            resident.gradient_norm - bounded_gradient_norm
+            resident_gradient_norm - bounded_gradient_norm
         ),
         future_clip_coefficient=future_clip_coefficient,
         gradient_tensor_count=len(gradient_manifest.tensors),
@@ -727,6 +776,12 @@ def run_bounded_backward(
         ),
         parameter_store_verified_tensor_count=parameter_verification.tensor_count,
         parameter_store_verified_chunk_count=parameter_verification.chunk_count,
+        oracle_gradient_store_verified_tensor_count=(
+            oracle_gradient_verification.tensor_count
+        ),
+        oracle_gradient_store_verified_chunk_count=(
+            oracle_gradient_verification.chunk_count
+        ),
         gradient_store_verified_tensor_count=gradient_verification.tensor_count,
         gradient_store_verified_chunk_count=gradient_verification.chunk_count,
         gradient_versions=tuple(
@@ -735,6 +790,6 @@ def run_bounded_backward(
     )
     if output_path is not None:
         write_json_atomic(output_path, result)
-    del activations, resident, bounded_gradients
+    del activations, oracle_gradients, bounded_gradients
     _release_accelerator(device)
     return result
