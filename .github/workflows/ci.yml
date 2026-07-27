@@ -23,7 +23,65 @@ jobs:
         run: |
           git fetch origin "$HEAD_REF"
           git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
-          git apply tools/oracle-gradient-docs.patch
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path("README.md"): [
+                  (
+                      "Bounded backward with a separate gradient store:",
+                      "Bounded backward with separate oracle and bounded gradient stores:",
+                  ),
+                  (
+                      "  --parameter-store runs/micro-backward-parameters \\\n"
+                      "  --gradient-store runs/micro-backward-gradients \\\n",
+                      "  --parameter-store runs/micro-backward-parameters \\\n"
+                      "  --oracle-gradient-store runs/micro-backward-oracle-gradients \\\n"
+                      "  --gradient-store runs/micro-backward-gradients \\\n",
+                  ),
+              ],
+              Path("docs/storage.md"): [
+                  (
+                      "Parameter gradients are written to a separate "
+                      "`VersionedTensorStore`. The parameter store is never modified.",
+                      "Resident-oracle gradients are first written to a dedicated "
+                      "versioned store. The resident gradient payloads and bootstrap "
+                      "parameter payloads are released before bounded execution begins. "
+                      "Bounded gradients are written to a second `VersionedTensorStore`. "
+                      "The parameter store is never modified.",
+                  ),
+                  (
+                      "After all groups complete, gradients are streamed from the gradient "
+                      "store to calculate the global norm. The result includes the clipping "
+                      "coefficient that a later optimizer phase would apply. Version 0.7 "
+                      "does not update parameters.",
+                      "After all groups complete, the oracle and bounded gradient stores are "
+                      "streamed independently to calculate their global norms. The complete "
+                      "states are loaded together only for the final tensor-level validation "
+                      "comparison. The result includes the clipping coefficient that a later "
+                      "optimizer phase would apply. Version 0.7 does not update parameters.",
+                  ),
+                  (
+                      "- parameter and gradient manifest IDs;",
+                      "- parameter, oracle-gradient, and bounded-gradient manifest IDs;",
+                  ),
+                  (
+                      "  --parameter-store runs/micro-backward-parameters \\\n"
+                      "  --gradient-store runs/micro-backward-gradients \\\n",
+                      "  --parameter-store runs/micro-backward-parameters \\\n"
+                      "  --oracle-gradient-store runs/micro-backward-oracle-gradients \\\n"
+                      "  --gradient-store runs/micro-backward-gradients \\\n",
+                  ),
+              ],
+          }
+          for path, pairs in replacements.items():
+              text = path.read_text()
+              for old, new in pairs:
+                  if old not in text:
+                      raise SystemExit(f"documentation replacement target not found: {path}: {old}")
+                  text = text.replace(old, new, 1)
+              path.write_text(text)
+          PY
       - name: Publish oracle gradient-store documentation
         if: matrix.python-version == '3.11' && github.event_name == 'pull_request'
         env:
