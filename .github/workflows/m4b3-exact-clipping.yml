@@ -1,0 +1,141 @@
+name: Prepare exact bounded AdamW clipping
+
+on:
+  push:
+    branches: [agent/m4b3-streamed-adamw]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m4b3-streamed-adamw
+      - name: Apply canonical clipping and single-tensor AdamW
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("microcolossus/bounded_optimizer.py")
+          text = path.read_text()
+          text = text.replace(
+              "    accelerator_memory_metrics,\n    process_rss_bytes,\n",
+              "    accelerator_memory_metrics,\n    model_checksum,\n    process_rss_bytes,\n",
+              1,
+          )
+          text = text.replace(
+              "from .training import make_synthetic_lm_batch, resolve_device, run_resident_step, seed_everything\n",
+              "from .training import make_synthetic_lm_batch, resolve_device, seed_everything\n",
+              1,
+          )
+          optimizer_pattern = (
+              "        weight_decay=config.training.weight_decay,\n"
+              "    )"
+          )
+          optimizer_replacement = (
+              "        weight_decay=config.training.weight_decay,\n"
+              "        foreach=False,\n"
+              "    )"
+          )
+          count = text.count(optimizer_pattern)
+          if count < 4:
+              raise SystemExit(f"expected at least four AdamW constructors, found {count}")
+          text = text.replace(optimizer_pattern, optimizer_replacement)
+
+          start = text.index("def _resident_oracle(")
+          end = text.index("\ndef _apply_adamw_group(", start)
+          resident = '''def _resident_oracle(
+              config: ExperimentConfig,
+              parameter_store: VersionedTensorStore,
+              oracle_store_path: Path,
+              input_ids: Tensor,
+              targets: Tensor,
+              device: torch.device,
+              *,
+              clipping_coefficient: float,
+              resident_gradient_norm: float,
+          ) -> ResidentOptimizerTrace:
+              model = DecoderOnlyTransformer(config.model).to(device)
+              restore_pytorch_model(
+                  model,
+                  (
+                      parameter_store.read_tensor(record.tensor_id)
+                      for record in sorted(
+                          parameter_store.current_manifest().tensors,
+                          key=lambda item: item.logical_name,
+                      )
+                  ),
+              )
+              optimizer = torch.optim.AdamW(
+                  model.parameters(),
+                  lr=config.training.learning_rate,
+                  weight_decay=config.training.weight_decay,
+                  foreach=False,
+              )
+              model.train()
+              optimizer.zero_grad(set_to_none=True)
+              output = model(input_ids.to(device), targets.to(device))
+              if output.loss is None:
+                  raise RuntimeError("resident oracle did not return a loss")
+              output.loss.backward()
+              for parameter in model.parameters():
+                  if parameter.grad is not None:
+                      parameter.grad.mul_(clipping_coefficient)
+              synchronize_accelerator(device)
+              optimizer.step()
+              synchronize_accelerator(device)
+              loss = float(output.loss.detach().cpu().item())
+              parameter_checksum = model_checksum(model)
+              state_payloads = export_pytorch_state(model, optimizer)
+              oracle_store = VersionedTensorStore.create(
+                  oracle_store_path,
+                  limits=_store_limits(config),
+              )
+              transaction = oracle_store.begin_transaction(committed_step=1)
+              transaction.put_many(state_payloads)
+              commit = transaction.commit()
+              del state_payloads, output, optimizer, model
+              gc.collect()
+              synchronize_accelerator(device)
+              return ResidentOptimizerTrace(
+                  loss=loss,
+                  gradient_norm=resident_gradient_norm,
+                  parameter_checksum=parameter_checksum,
+                  store_commit=commit.telemetry,
+              )
+          '''
+          text = text[:start] + resident + text[end:]
+          call_old = '''    resident = _resident_oracle(
+                  config,
+                  parameter_store,
+                  oracle_state_store_path,
+                  input_ids,
+                  targets,
+                  device,
+              )
+          '''
+          call_new = '''    resident = _resident_oracle(
+                  config,
+                  parameter_store,
+                  oracle_state_store_path,
+                  input_ids,
+                  targets,
+                  device,
+                  clipping_coefficient=backward.future_clip_coefficient,
+                  resident_gradient_norm=backward.resident_gradient_norm,
+              )
+          '''
+          if call_old not in text:
+              raise SystemExit("resident oracle call replacement target not found")
+          text = text.replace(call_old, call_new, 1)
+          path.write_text(text)
+          PY
+          git rm .github/workflows/m4b3-exact-clipping.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add microcolossus/bounded_optimizer.py
+          git commit -m "Use canonical clipping for exact bounded AdamW"
+          git push origin HEAD:agent/m4b3-streamed-adamw
