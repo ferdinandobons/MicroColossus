@@ -45,7 +45,7 @@ Process RSS, framework allocator values, Metal driver allocation, compressed mem
 ### NVMe is the capacity tier
 
 ```text
-MPS or MLX execution and active tensor working set
+MLX or MPS execution and active tensor working set
                          |
 bounded unified-memory staging and runtime state
                          |
@@ -158,7 +158,17 @@ The intended components are:
 - layer-wise and tile-wise forward, backward, and optimizer execution;
 - telemetry for memory, pressure, storage traffic, stalls, throughput, and writes.
 
-## 9. Current implementation
+## 9. Backend strategy
+
+The current decision is **DUAL BACKEND**.
+
+- **MLX** is the preferred native Apple Silicon execution candidate.
+- **PyTorch MPS** remains the portable numerical oracle and reference implementation.
+- **Storage and transaction logic** must remain backend-neutral.
+
+The decision is based on resident measurements, not storage-backed execution. The storage milestone must compare both adapters before assigning all future execution responsibilities.
+
+## 10. Current implementation
 
 Implemented:
 
@@ -171,12 +181,13 @@ Implemented:
 - NumPy-independent training checksums;
 - static memory estimation with unified-memory warnings;
 - atomic JSON and JSONL run artifacts;
-- a backend-neutral competitive benchmark schema;
+- backend-neutral competitive benchmark schemas;
 - portable identical benchmark weights and batches;
 - synchronized PyTorch resident benchmark;
 - PyTorch activation-checkpointing benchmark;
-- an optional equivalent MLX resident implementation;
-- benchmark comparison JSON;
+- equivalent MLX resident benchmark;
+- atomic final-state `.state.npz` artifacts;
+- tensor-level final-state comparison;
 - tests, linting, type checking, compilation, and CI smoke runs.
 
 Not implemented:
@@ -190,43 +201,77 @@ Not implemented:
 - tensor journal and crash recovery;
 - training state larger than safe resident unified memory.
 
-## 10. Verified evidence
+## 11. Verified evidence
 
-A clean independent run on commit `a56fc514f2f8e705654034f3c2f02e3a441c61f3` passed on a MacBook Air M2 with 8 GB of unified memory.
+### Resident MPS foundation
 
-The clean pass included:
+A clean independent run on commit `a56fc514f2f8e705654034f3c2f02e3a441c61f3` passed on a MacBook Air M2 with 8 GB unified memory.
+
+It validated:
 
 - native arm64 execution;
-- Ruff, pytest, compileall, and mypy;
-- 21 tests;
+- project checks;
 - MPS preflight;
 - explicit MPS training;
 - automatic MPS selection;
-- a larger resident smoke run;
 - CPU-versus-MPS comparison;
 - fixed-batch learning from `5.566842079162598` to `0.4145740866661072`;
 - no detected fallback, unsupported operator, non-finite value, or MPS OOM;
-- a clean source tree before and after the run.
+- a clean source tree.
 
-MPS was not bitwise reproducible by final checksum. Numerical reproducibility must therefore be evaluated with tensor-level tolerances and trajectories.
+MPS was not bitwise reproducible by final checksum. Numerical reproducibility is evaluated with tensor-level tolerances and trajectories.
 
-This evidence validates only the resident scope. It does not validate out-of-core execution.
+### Competitive resident result
 
-## 11. Competitive engineering policy
+A clean version `0.3.2` run completed all resident PyTorch MPS, checkpointed PyTorch MPS, and MLX variants on a 23,213,056-parameter workload.
 
-MicroColossus must be competitive by measurement.
+Median throughput:
 
-The initial direct Apple Silicon baseline set is:
+| Variant | Tokens/s |
+|---|---:|
+| PyTorch MPS | 1,379.23 |
+| PyTorch MPS checkpointed | 1,337.37 |
+| MLX | 2,195.69 |
+
+MLX was approximately `1.592x` faster than PyTorch MPS in the measured resident workload.
+
+PyTorch and MLX remained numerically close:
+
+- maximum loss difference: about `1.91e-06`;
+- maximum final-parameter absolute difference: about `3.80e-05`;
+- mean final-parameter absolute difference: about `7.38e-09`;
+- all values finite and stable across three rounds.
+
+### Final release-quality gate
+
+Version `0.3.3`, commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c`, passed a fresh target-machine verification:
+
+- Ruff passed;
+- mypy passed with no issues in 17 source files;
+- pytest passed with 28 tests;
+- compileall passed;
+- doctor detected Apple M2 MPS;
+- all three tiny backend variants passed;
+- state and batch checksums were equal;
+- JSON and `.state.npz` artifacts were valid;
+- no fallback or unsupported operator evidence was reported;
+- the working tree remained clean.
+
+This evidence validates resident execution and the benchmark contract. It does not validate out-of-core execution.
+
+## 12. Competitive engineering policy
+
+MicroColossus must remain competitive by measurement.
+
+Direct Apple Silicon baselines include:
 
 1. resident PyTorch MPS;
 2. PyTorch MPS with activation checkpointing;
-3. native uncompiled MLX with an equivalent controlled Transformer;
-4. compiled MLX as an optimized variant;
+3. native MLX with an equivalent controlled Transformer;
+4. compiled MLX when justified;
 5. MLX-LM full-model fine-tuning when semantically comparable;
 6. MicroColossus reference execution;
 7. compact and adapter modes, reported separately.
-
-Systems that cannot run directly on Apple MPS remain architectural references.
 
 An apples-to-apples comparison should hold constant:
 
@@ -252,28 +297,74 @@ Required metrics include:
 
 An optimization is accepted only when it improves a declared objective without violating correctness, memory, endurance, stability, recovery, or reproducibility constraints.
 
-If MLX materially outperforms PyTorch MPS for a required path, the project should add or select an MLX backend rather than retain a slower path by inertia. PyTorch remains the portable numerical reference.
+## 13. Tensor manifest and transaction contract
 
-## 12. Benchmark contract
+The next implementation uses a backend-neutral logical model.
 
-The competitive harness uses:
+Each tensor record must identify:
 
-- one portable FP32 initial state generated outside either framework;
-- one deterministic portable token stream;
-- checksums for state and batches;
-- matching model structure and AdamW hyperparameters;
-- explicit warm-up and measured phases;
-- synchronization around every timed update;
-- raw step records and aggregated summaries;
-- separate framework memory semantics.
+```text
+tensor_id
+logical_name
+kind
+shape
+dtype
+version
+chunk_ids
+byte_length
+checksum
+committed_step
+```
 
-Framework memory counters are not treated as directly comparable physical-memory values. macOS pressure and swap are required external cross-checks.
+Initial tensor kinds include:
 
-The PyTorch path has CPU automated coverage. The MLX path must be run and validated on the target M2 before a performance conclusion is accepted.
+```text
+parameter
+gradient
+adam_first_moment
+adam_second_moment
+master_weight
+metadata
+```
 
-## 13. Storage and recovery requirements
+Each chunk record must identify:
 
-The future tensor store should provide:
+```text
+chunk_id
+storage_path
+byte_offset
+byte_length
+checksum
+compression
+creation_transaction
+```
+
+Each transaction must identify:
+
+```text
+transaction_id
+parent_manifest
+candidate_manifest
+created_chunks
+expected_checksums
+state
+```
+
+Transaction states begin with:
+
+```text
+prepared
+writing
+validated
+committed
+aborted
+```
+
+A transaction cannot publish a new manifest until every required chunk is durable and checksum-valid.
+
+## 14. Storage and recovery requirements
+
+The tensor store must provide:
 
 - immutable or copy-on-write chunks;
 - logical tensor versions;
@@ -287,7 +378,16 @@ The future tensor store should provide:
 
 A step is committed only after all required chunks and the new manifest are durable. Until then, the previous committed version remains authoritative.
 
-## 14. Roadmap
+Recovery must distinguish:
+
+- the last committed manifest;
+- complete but unpublished chunks;
+- partial chunk writes;
+- checksum failures;
+- aborted transactions;
+- stale cache entries.
+
+## 15. Roadmap
 
 ### M0. Resident foundation
 
@@ -295,23 +395,32 @@ Status: completed.
 
 ### M1. Clean Mac M2 validation
 
-Status: completed with a strict protocol pass for the resident scope.
+Status: completed.
 
 ### M2. Competitive Apple Silicon baseline
 
-- execute PyTorch MPS, checkpointed PyTorch MPS, and MLX;
-- validate equal state and batches;
-- compare numerical trajectories, throughput, and memory behavior;
-- add compiled MLX and other justified variants;
-- document the backend decision.
+Status: completed.
+
+Established:
+
+- equivalent PyTorch and MLX workloads;
+- target-hardware correctness and artifact validation;
+- resident performance comparison;
+- dual-backend decision;
+- clean release-quality verification.
 
 ### M3. Versioned NVMe tensor store
 
-- chunk identifiers and manifests;
+Status: next.
+
+- stable tensor, chunk, manifest, and transaction schemas;
 - checksums and copy-on-write versions;
-- journal and recovery;
+- write-ahead journal;
+- atomic manifest publication;
+- recovery and failure injection;
 - bounded staging;
-- storage telemetry.
+- storage telemetry;
+- PyTorch and MLX export and restore adapters.
 
 ### M4. Synchronous storage-to-accelerator execution
 
@@ -349,7 +458,7 @@ Status: completed with a strict protocol pass for the resident scope.
 
 Scale targets are research goals, not guaranteed outcomes.
 
-## 15. Success criteria
+## 16. Success criteria
 
 The first meaningful storage-backed milestone requires:
 
