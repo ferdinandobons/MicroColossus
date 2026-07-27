@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "microcolossus"
-version = "0.3.1"
+version = "0.3.2"
 description = "Experimental strict-budget training runtime focused on Apple Silicon MPS."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,14 +21,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "mypy>=1.11",
-  "numpy>=2.0",
+  "numpy>=2.4,<2.5",
   "pytest>=8.0",
   "ruff>=0.6",
   "types-psutil",
   "types-PyYAML",
 ]
 benchmark = [
-  "numpy>=2.0",
+  "numpy>=2.4,<2.5",
   "mlx>=0.32.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
