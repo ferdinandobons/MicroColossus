@@ -28,14 +28,6 @@ Tested commit:
 
 Overall result: **FAIL**.
 
-Confirmed successes:
-
-- isolated installation completed after a network retry;
-- the static planner completed;
-- bytecode compilation passed;
-- CUDA was unavailable and was skipped correctly;
-- the source tree remained clean.
-
 Blocking findings:
 
 1. Ruff found an import-format problem in `microcolossus/planner.py`.
@@ -88,8 +80,6 @@ The fixes were:
 1. remove an extra blank line that failed Ruff formatting;
 2. calculate the global gradient norm without constructing float64 tensors on MPS.
 
-The MPS-safe path accumulates float32 squared-gradient sums on the device, transfers scalar values to CPU, and combines them with Python floating-point summation. A regression test protects this behavior.
-
 Reported CPU-versus-MPS one-step differences for the tiny workload:
 
 - worst parameter absolute difference: `9.277835488319397e-06`;
@@ -99,25 +89,15 @@ Reported CPU-versus-MPS one-step differences for the tiny workload:
 
 The fixed-batch MPS diagnostic reduced loss from `5.566842079162598` to `0.4145740866661072`.
 
-Repeated MPS runs were not bitwise identical by final checksum. Loss and gradient norm were identical at the first checksum divergence. MPS reproducibility is therefore evaluated numerically as well as bitwise.
+Repeated MPS runs were not bitwise identical by final checksum. Loss and gradient norm were identical at the first checksum divergence. MPS reproducibility is evaluated numerically as well as bitwise.
 
-## Clean Mac M2 rerun. July 27, 2026
+## Clean resident Mac M2 rerun. July 27, 2026
 
 Tested commit:
 
 ```text
 a56fc514f2f8e705654034f3c2f02e3a441c61f3
 ```
-
-Environment:
-
-- MacBook Air;
-- Apple M2;
-- 8 GB unified memory;
-- native arm64 execution;
-- no Rosetta translation;
-- PyTorch 2.13.0;
-- MPS built and available.
 
 Overall result: **PASS**.
 
@@ -148,145 +128,218 @@ Observed learning result:
 
 The diagnostic reported no evidence of deliberate CPU fallback, unsupported MPS operators in the tested path, NaN, infinity, or MPS out-of-memory failure.
 
-One warning reported that NumPy was not installed. It did not block resident training because core checksums no longer require NumPy. NumPy is now an explicit dependency of the development and benchmark extras, not of the core runtime.
+This pass validates resident training, device selection, telemetry, and the tested model paths. It does not validate NVMe, streaming, tiling, or out-of-core execution.
 
-### Exact boundary of the clean pass
+## Competitive benchmark harness
 
-The clean pass validates:
-
-- package installation and project checks;
-- the controlled decoder-only Transformer;
-- full-parameter resident AdamW training;
-- the tested MPS operator path;
-- device selection and diagnostics;
-- resident telemetry and artifact generation;
-- the tested tiny and small configurations.
-
-It does not validate:
-
-- NVMe-backed parameters or optimizer state;
-- storage-to-accelerator streaming;
-- out-of-core execution;
-- runtime-managed activation recomputation;
-- asynchronous prefetch or writeback;
-- intra-layer tiling;
-- crash recovery;
-- training state larger than safe resident unified memory.
-
-## Competitive benchmark harness. Version 0.3.0
-
-After the clean M2 pass, the repository added a backend-neutral resident benchmark harness.
-
-Implemented features:
+Version 0.3 introduced a backend-neutral resident benchmark with:
 
 - one portable FP32 parameter state generated outside either framework;
-- one portable deterministic token-batch stream;
+- one deterministic portable token stream;
 - matching controlled Transformer architecture in PyTorch and MLX;
 - synchronized warm-up and measured phases;
 - uncheckpointed PyTorch resident execution;
 - PyTorch activation-checkpointing execution;
-- an uncompiled MLX resident implementation;
+- an MLX resident implementation;
 - matching AdamW coefficients, epsilon, bias correction, clipping, batch, and sequence settings;
 - first-step and steady-state latency statistics;
 - tokens per second;
 - process RSS, framework allocator values, available system memory, memory percentage, and swap usage;
 - machine-readable benchmark and comparison schemas;
-- checksums for the portable initial state and input batches;
-- warnings that prevent allocator counters from being treated as physical-memory equivalents.
+- initial-state and input-batch checksums;
+- atomic final-state `.state.npz` artifacts;
+- tensor-level numerical comparison.
 
-The PyTorch CPU benchmark and checkpointed variant received automated test coverage and a CI smoke command.
+## First competitive target attempt
 
-The MLX backend was implemented against documented MLX APIs. It was not considered validated because it had not run on the target M2.
+Commit `2f7963a5d0af3eabb5a31eab4013f422725c71c0` stopped at the project-check gate.
 
-## Benchmark hardening. Version 0.3.1
+Blocking findings:
 
-A design review found that the version 0.3.0 benchmark kept the portable NumPy initialization state alive while the framework model was being measured. On an 8 GB unified-memory system, that duplicate full-model copy would inflate process memory and could distort swap and pressure results.
+1. Ruff import ordering in benchmark modules.
+2. NumPy 2.5 typing syntax incompatible with the configured Python 3.11 mypy target.
 
-Version 0.3.1 changes the benchmark contract:
+No performance benchmark or backend decision was accepted from that attempt.
 
-- initial swap is sampled before constructing portable state;
-- the backend loads the portable state and clears the NumPy state dictionary before warm-up;
-- garbage collection runs before measured execution;
-- the result records whether the initialization state was released;
-- the result records the byte size of portable state and batches;
-- final parameters are exported only after the timed region;
-- final parameters are written atomically to a sibling `.state.npz` artifact;
-- the final-state artifact is protected by a checksum;
-- benchmark comparison loads and verifies both state artifacts;
-- every final parameter tensor is compared for maximum absolute, mean absolute, and maximum relative difference;
-- comparisons record finite-value status and the worst absolute and relative tensors;
-- the implementation was split into schema, data, runner, comparison, and backend modules.
+## Competitive target run. Version 0.3.2
 
-Development-environment verification for the hardened path:
+Tested commit:
 
-- five dedicated benchmark tests passed;
-- identical PyTorch CPU runs produced zero final-state tensor difference;
-- the activation-checkpointing variant completed;
-- state artifacts and checksums were validated;
-- bytecode compilation passed;
-- no new benchmark source line exceeded the configured 100-character limit.
+```text
+785183a1ff87df0c22df9619d1ab7bf53968bc79
+```
 
-This verification does not establish that the MLX backend works correctly on the target M2. It establishes the CPU-tested benchmark infrastructure that the target run will use.
+Environment:
 
-## M2 competitive preset
+- MacBook Air M2;
+- 8 GB unified memory;
+- native arm64 without Rosetta;
+- PyTorch `2.13.0`;
+- MLX `0.32.0`;
+- NumPy `2.4.6`;
+- MPS fallback disabled.
 
-`examples/m2-competitive.yaml` defines a controlled 23,213,056-parameter resident workload:
+Runtime result: **PASS**.
 
-- 6 Transformer blocks;
-- hidden size 512;
-- 8 attention heads;
-- vocabulary 8,192;
-- sequence length 128;
-- microbatch 1;
-- dropout disabled;
-- MPS target;
-- 8 GB unified-memory system model.
+Repository-quality result at that commit: **PARTIAL PASS**, because mypy reported three static typing errors while every runtime variant completed.
 
-The tiny configuration remains the first smoke test. The competitive preset is intended to reduce the fraction of time dominated by framework startup and compilation overhead.
+Completed:
 
-## Competitive validation gate
+- PyTorch MPS preflight;
+- MLX preflight;
+- all three tiny variants;
+- three counterbalanced competitive rounds for each backend variant;
+- all nine competitive runs;
+- equal portable initial-state checksums;
+- equal token-batch checksums;
+- valid final-state artifacts;
+- clean repository state;
+- no detected hidden fallback, unsupported operator, non-finite value, or MPS OOM.
 
-Direct Apple Silicon baselines begin with:
+The competitive workload used 23,213,056 parameters, 6 blocks, hidden size 512, 8 heads, vocabulary 8,192, sequence length 128, microbatch 1, and full-parameter FP32 AdamW.
 
-1. resident PyTorch MPS;
-2. PyTorch MPS with activation checkpointing;
-3. native MLX with the equivalent controlled Transformer;
-4. compiled MLX as a later optimized variant;
-5. MLX-LM full-model fine-tuning when semantically comparable;
-6. MicroColossus reference execution;
-7. future compact and adapter modes, reported separately.
+Median measured throughput:
 
-Storage-offload systems that cannot run on MPS remain architectural references rather than direct hardware benchmarks.
+| Variant | Tokens/s | Relative to PyTorch |
+|---|---:|---:|
+| PyTorch MPS | 1,379.23 | 1.000x |
+| PyTorch MPS checkpointed | 1,337.37 | 0.970x |
+| MLX | 2,195.69 | 1.592x |
 
-Every accepted comparison records:
+Numerical result:
 
-- architecture and unique parameter count;
-- initial state and batch checksums;
-- precision, optimizer, clipping, and update semantics;
-- sequence length, microbatch, warm-up, and measured steps;
-- synchronization policy;
-- exact framework, Python, macOS, and repository versions;
-- first-step and steady-state latency;
-- tokens per second;
-- process footprint, framework memory counters, available memory, pressure, and swap;
-- final parameter tensor differences;
-- storage bytes and SSD writes when storage is involved;
-- numerical distance from the reference.
+- PyTorch versus checkpointed PyTorch: exact equality in the competitive runs;
+- PyTorch versus MLX maximum loss difference: `1.9073486328125e-06`;
+- PyTorch versus MLX maximum final-parameter absolute difference: `3.8036610931158066e-05`;
+- PyTorch versus MLX mean final-parameter absolute difference: `7.378751249633382e-09`;
+- all values finite and stable across all three rounds.
 
-An optimization is accepted only when it improves a declared objective without violating correctness, memory, endurance, stability, recovery, or reproducibility constraints.
+Backend decision: **DUAL BACKEND**.
 
-## Next required validation
+- MLX is the preferred optimized Apple Silicon execution candidate.
+- PyTorch MPS remains the portable numerical oracle and recovery/debugging reference.
+- The storage layer must remain backend-neutral.
 
-The next target-hardware run should:
+Activation checkpointing was classified as **INCONCLUSIVE** for this model because it was numerically equivalent but did not produce a decisive memory benefit and reduced throughput by about 3%.
 
-1. start from a clean checkout of version 0.3.1 or later;
-2. install the `benchmark` extra;
-3. run the tiny PyTorch MPS, checkpointed PyTorch MPS, and MLX smoke tests;
-4. compare initial-state, batch, and final-state artifacts;
-5. run the same three variants with `examples/m2-competitive.yaml`;
-6. compare loss trajectories, final tensors, throughput, memory pressure, and swap;
-7. inspect framework memory values together with macOS pressure and swap;
-8. preserve JSON and `.state.npz` artifacts with exact versions;
-9. leave the source tree clean.
+## Typing corrections. Version 0.3.3
 
-No backend decision should be made before those results exist. No out-of-core claim should be made before storage-backed execution exists.
+The competitive run found three static typing issues:
+
+1. dynamic NumPy `savez` archive-member typing;
+2. MLX `tree_flatten` union narrowing;
+3. MLX AdamW `betas` annotation.
+
+Commit:
+
+```text
+b75d2f646da4ca4dce5acdee567a1f17adcc503c
+```
+
+Version `0.3.3` applied runtime-preserving fixes for all three findings.
+
+## Final 0.3.3 verification
+
+A fresh Mac M2 clone of commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c` completed the final release-quality gate.
+
+Environment:
+
+- MicroColossus `0.3.3`;
+- NumPy `2.4.6`;
+- PyTorch `2.13.0`;
+- MLX import successful;
+- MPS built and available;
+- MPS fallback disabled.
+
+Project checks:
+
+- Ruff: passed, all checks passed;
+- mypy: passed, no issues in 17 source files;
+- pytest: passed, 28 tests;
+- compileall: passed;
+- doctor: passed and detected Apple M2 MPS.
+
+Tiny smoke results:
+
+| Variant | Tokens/s | Final loss |
+|---|---:|---:|
+| PyTorch MPS | 10,339.74 | 5.601982116699219 |
+| PyTorch MPS checkpointed | 8,083.50 | 5.601982593536377 |
+| MLX | 13,927.55 | 5.601983070373535 |
+
+Equivalence and artifact checks:
+
+- portable-state checksum identical: `c375bea95d4d37da897cf852d824098775ef1552530cc2936876167ae53cdc40`;
+- batch checksum identical: `a2eacb6299cacfdc41d19863545606365c2b4c793c0dc0336b19f4cb3b4eacce`;
+- every JSON document parsed;
+- every `.state.npz` artifact existed and matched its recorded checksum;
+- all final parameters were finite;
+- no fallback, unsupported operator, OOM, allocation failure, NaN, or infinity evidence was found;
+- `git status --short` was empty;
+- `git diff --check` was clean.
+
+Numerical comparison:
+
+- PyTorch versus checkpointed maximum loss difference: `4.768e-07`;
+- PyTorch versus checkpointed maximum final-state absolute difference: `5.960e-08`;
+- PyTorch versus MLX maximum loss difference: `9.536e-07`;
+- PyTorch versus MLX maximum final-state absolute difference: `3.4948e-05`;
+- PyTorch versus MLX mean final-state absolute difference: `1.20696e-08`.
+
+The tiny results did not materially differ from the previous baseline. The nine larger performance runs were not repeated because version `0.3.3` changed typing contracts without changing the numerical algorithm or benchmark schedule.
+
+Overall result: **PASS**.
+
+## Milestone status
+
+### M0. Resident foundation
+
+Completed.
+
+### M1. Clean Mac M2 validation
+
+Completed.
+
+### M2. Competitive Apple Silicon baseline
+
+Completed.
+
+Established:
+
+- both resident backends execute correctly on the target;
+- the benchmark provides equal initial state and batches;
+- artifacts are verifiable;
+- numerical distance is measured;
+- resident performance is characterized;
+- the dual-backend decision is evidence-backed;
+- package quality checks pass on the target environment.
+
+### M3. Versioned NVMe tensor store
+
+Next.
+
+Required validation:
+
+- deterministic tensor and chunk manifests;
+- immutable or copy-on-write chunks;
+- per-chunk checksums;
+- atomic manifest publication;
+- write-ahead journal;
+- recovery after partial writes and interruption;
+- bounded staging memory;
+- read and write telemetry;
+- PyTorch and MLX export and restore equivalence;
+- clean source tree and reproducible artifacts.
+
+## Current boundary
+
+The completed resident and competitive milestones do not validate:
+
+- NVMe-backed parameters or optimizer state;
+- storage-to-accelerator streaming;
+- managed activation recomputation;
+- asynchronous prefetch or writeback;
+- intra-layer tiling;
+- transactional optimizer publication;
+- crash recovery;
+- training state larger than safe resident unified memory.
