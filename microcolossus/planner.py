@@ -9,7 +9,6 @@ from torch import nn
 
 from .config import ExperimentConfig
 
-
 GIB = 1024**3
 
 
