@@ -1,42 +1,38 @@
 # Versioned Tensor Store and Bounded Execution
 
-This document describes the storage foundation introduced in MicroColossus 0.4, the observable optimizer lifecycle introduced in 0.5, bounded forward in 0.6, bounded backward and gradient storage in 0.7, and group-bounded AdamW with atomic step-bundle publication in 0.8.
+This document is the technical design record for the storage, transaction, bounded-execution, gradient, optimizer, and atomic step-publication systems implemented through MicroColossus 0.8.
 
-## Scope
+## 1. Scope
 
-The tensor store keeps canonical training state outside framework-owned memory. Its internal representation does not depend on `torch.Tensor` or `mlx.core.array`.
+The storage subsystem keeps canonical training state outside framework-owned memory. Its internal representation does not depend on `torch.Tensor` or `mlx.core.array`.
 
-The current implementation has three distinct compute paths:
+The current runtime exposes four related execution paths:
 
-- `storage-step` validates an entire optimizer lifecycle, but materializes the complete micro model and optimizer;
-- `bounded-forward` materializes one parameter execution group at a time and retains hidden activations;
-- `bounded-backward` recomputes one local group at a time, propagates one activation gradient at a time, and persists final parameter gradients in a separate versioned store;
-- `bounded-step` consumes those gradients, streams one unique parameter and Adam state group at a time, and atomically publishes a complete root step bundle.
+- `storage-step`: validates a complete storage-backed optimizer lifecycle while materializing the full micro model and optimizer during compute;
+- `bounded-forward`: materializes one parameter execution group at a time and retains hidden boundary activations;
+- `bounded-backward`: processes groups in reverse, persists final gradients, and streams the global gradient norm;
+- `bounded-step`: consumes the final gradient store, executes AdamW group by group, and atomically publishes a complete root step bundle.
 
-Version 0.8 still implements one isolated step. Multiple-step scheduling and resume remain separate milestones.
+Version 0.8 executes one isolated optimizer step. Consecutive-step scheduling, checkpoint and resume, activation offload, asynchronous I/O, and intra-layer tiling remain later milestones.
 
-## Store layout
+## 2. Design invariants
 
-```text
-store/
-  store.json
-  CURRENT
-  CUMULATIVE_WRITES
-  chunks/
-    <prefix>/<sha256>.chunk
-  manifests/
-    <manifest-id>.json
-  transactions/
-    <transaction-id>/journal.jsonl
-  telemetry/
-    events.jsonl
-```
+The implementation is built around these invariants:
 
-Chunks are content-addressed by SHA-256. Published manifests are immutable. `CURRENT` is the authoritative pointer and is replaced atomically only after all candidate chunks and the candidate manifest have been written, synchronized, and validated.
+1. published manifests are immutable;
+2. chunks are content-addressed and immutable;
+3. a candidate tensor-store manifest is not authoritative until `CURRENT` is replaced atomically;
+4. a candidate training step is not authoritative until the root step-bundle `CURRENT` is replaced atomically;
+5. interrupted work never silently replaces the last committed state;
+6. every managed tensor has explicit identity, version, shape, dtype, byte order, kind, checksum, and lineage;
+7. tied parameters have explicit read, gradient-accumulation, and optimizer-update semantics;
+8. every bounded phase rejects an oversized group before compute;
+9. storage and framework memory counters are reported separately;
+10. full-state materialization used only for validation is declared explicitly and excluded from bounded-execution claims.
 
-## Canonical tensor representation
+## 3. Canonical tensor representation
 
-Each tensor record contains:
+A `TensorPayload` is the framework-neutral in-memory form used to stage canonical tensor data. A published tensor record contains:
 
 ```text
 tensor_id
@@ -53,7 +49,7 @@ committed_step
 adapter metadata
 ```
 
-Initial tensor kinds are:
+Supported initial tensor kinds are:
 
 - `parameter`;
 - `gradient`;
@@ -62,11 +58,68 @@ Initial tensor kinds are:
 - `master_weight`;
 - `metadata`.
 
-Multi-byte values use canonical little-endian storage. Non-contiguous inputs are normalized to contiguous logical bytes before checksumming and chunking.
+Multi-byte numeric values use canonical little-endian storage. Non-contiguous framework tensors are normalized to contiguous logical bytes before checksumming and chunking.
 
-## Transaction protocol
+### 3.1 Logical names
 
-A transaction moves through:
+Logical names remain stable across storage versions and are independent of content hashes. Examples include:
+
+```text
+model.token_embedding.weight
+model.blocks.0.attention.qkv.weight
+gradient.model.blocks.0.attention.qkv.weight
+optimizer.blocks.0.attention.qkv.weight.exp_avg
+optimizer.blocks.0.attention.qkv.weight.exp_avg_sq
+optimizer.blocks.0.attention.qkv.weight.step
+optimizer.param_groups
+```
+
+The exact adapter metadata records backend-specific model or optimizer paths without making them the primary tensor identity.
+
+## 4. Tensor-store layout
+
+```text
+store/
+  store.json
+  CURRENT
+  CUMULATIVE_WRITES
+  chunks/
+    <prefix>/<sha256>.chunk
+  manifests/
+    <manifest-id>.json
+  transactions/
+    <transaction-id>/journal.jsonl
+  telemetry/
+    events.jsonl
+```
+
+### 4.1 Store metadata
+
+`store.json` defines schema version and limits, including:
+
+- chunk size;
+- maximum managed storage bytes;
+- maximum transaction staging bytes.
+
+### 4.2 Content-addressed chunks
+
+Chunk IDs are SHA-256 digests of immutable chunk contents. Identical content can be reused across tensor versions and manifests.
+
+### 4.3 Tensor manifests
+
+A manifest defines one complete logical view of the tensor store. It contains ordered tensor records and the committed step. Published manifests are immutable.
+
+### 4.4 `CURRENT`
+
+`CURRENT` identifies the authoritative manifest and its checksum. It is written to a temporary file, flushed, synchronized, and atomically renamed only after the candidate manifest and all referenced chunks validate.
+
+### 4.5 Cumulative writes
+
+`CUMULATIVE_WRITES` tracks application-managed state bytes written through the store. It is not an estimate of physical NAND writes.
+
+## 5. Tensor-store transaction protocol
+
+A transaction follows:
 
 ```text
 prepared -> writing -> validated -> committed
@@ -74,35 +127,50 @@ prepared -> writing -> validated -> committed
                              -> aborted
 ```
 
-The synchronous commit path is:
+The synchronous commit sequence is:
 
-1. build a copy-on-write candidate manifest;
-2. calculate tensor and chunk checksums;
-3. reject the transaction when storage or staging limits would be exceeded;
-4. write each new chunk through a transaction-local partial file;
-5. flush and `fsync` the chunk;
-6. atomically rename the chunk into the content-addressed directory;
-7. read and validate all candidate chunks and tensors;
-8. write and `fsync` the candidate manifest;
-9. atomically publish the manifest file;
-10. write and `fsync` a candidate `CURRENT` pointer;
-11. atomically replace `CURRENT`;
-12. append the committed journal state.
+1. read the current parent manifest;
+2. build a copy-on-write candidate manifest;
+3. canonicalize payload bytes;
+4. compute whole-tensor and chunk checksums;
+5. enforce staging and storage budgets;
+6. write every new chunk through a transaction-local partial file;
+7. flush and `fsync` the chunk file;
+8. atomically rename the chunk into the content-addressed directory;
+9. validate every candidate tensor from referenced chunks;
+10. write and `fsync` the candidate manifest;
+11. atomically publish the manifest file;
+12. write and `fsync` a candidate `CURRENT` pointer;
+13. atomically replace `CURRENT`;
+14. append the committed journal state;
+15. release staged payload references held by the transaction.
 
-Until step 11 completes, the previous manifest remains authoritative.
+Until step 13 completes, the previous manifest remains authoritative.
 
-## Recovery and failure injection
+### 5.1 Copy-on-write behavior
 
-`store-recover` verifies the current state and marks incomplete transactions aborted without publishing their candidate manifest.
+A transaction copies unchanged tensor records from the parent manifest and replaces only records explicitly updated in the candidate. Unchanged chunks remain referenced by content hash.
+
+### 5.2 Transaction payload lifetime
+
+A committed or aborted transaction clears staged payload and explicit-version maps. This prevents a transaction object that remains alive from retaining a hidden full copy of canonical state in RAM.
+
+Regression tests use weak references to verify that staged payloads can be collected after commit or abort.
+
+## 6. Recovery and corruption handling
+
+`store-recover` verifies the current manifest and marks incomplete transactions aborted without publishing candidate state.
 
 Recovery reports, but does not silently delete:
 
 - partial chunk files;
 - complete chunks not referenced by a manifest;
 - unpublished manifests;
-- temporary pointer or manifest files.
+- temporary manifest files;
+- temporary pointer files;
+- incomplete and aborted transactions.
 
-Tests and target-hardware diagnostics inject interruptions:
+Validated tensor-store failure points include:
 
 - before a chunk write;
 - during a partial chunk write;
@@ -110,109 +178,210 @@ Tests and target-hardware diagnostics inject interruptions:
 - before manifest rename;
 - before `CURRENT` rename.
 
-Every validated interruption leaves the prior committed manifest authoritative.
+For every accepted failure test, the previous committed manifest remains authoritative.
 
-## Budgets
+Checksum validation exists at:
 
-`StoreLimits` defines:
+- chunk level;
+- whole-tensor level;
+- tensor-store manifest level;
+- root step-bundle level.
 
-- chunk size;
-- maximum managed storage content;
-- maximum internal staging buffer.
+## 7. Framework adapters
 
-Bounded execution adds logical working-set budgets:
-
-- parameter bytes for one execution group;
-- gradient bytes for one backward group;
-- parameter, gradient, first-moment, second-moment, and step bytes for one optimizer group.
-
-A group is rejected before compute when it exceeds its declared budget. These logical limits do not represent total physical memory. RSS, framework allocations, driver allocations, activations, page cache, compression, and operating-system pressure remain separate measurements.
-
-## Store telemetry
-
-Store operations report:
-
-- logical and physical bytes read or written;
-- chunk reads, writes, and reuse;
-- checksum time;
-- read and write time;
-- `fsync` time;
-- manifest publication time;
-- recovery time and actions;
-- current store size;
-- cumulative managed-state bytes written.
-
-Filesystem metadata, APFS copy-on-write behavior, controller behavior, and NAND-level writes are not inferred from application counters.
-
-## Framework adapters
+### 7.1 PyTorch
 
 The PyTorch adapter exports and restores:
 
 - unique model parameters;
-- buffers;
-- AdamW first and second moments;
+- model buffers;
+- AdamW first moments;
+- AdamW second moments;
 - optimizer step tensors;
-- scalar parameter-group settings.
+- scalar parameter-group metadata.
 
-The MLX adapter exports and restores flattened model and optimizer trees through canonical NumPy-compatible arrays.
+Shared PyTorch parameters are exported once through `named_parameters(remove_duplicate=True)`.
 
-Storage records and manifests remain independent of both frameworks.
+### 7.2 MLX
 
-## Observable storage-backed optimizer lifecycle
+The MLX adapter flattens model and optimizer trees into canonical NumPy-compatible arrays. It restores model weights and optimizer state through stable flattened paths.
 
-`storage-step` performs:
+### 7.3 Adapter boundary
+
+The storage layer owns canonical bytes, versions, checksums, and transactions. Framework adapters own conversion to and from framework arrays.
+
+## 8. Step-bundle store
+
+Version 0.8 introduces a root transaction layer above child tensor stores.
+
+### 8.1 Layout
+
+```text
+bundle-root/
+  CURRENT
+  manifests/
+    <bundle-id>.json
+  work/
+    parameters/
+    oracle-gradients/
+    bounded-gradients/
+    initial-optimizer/
+    oracle-state/
+  candidates/
+    step-1-parameters/
+    step-1-optimizer/
+```
+
+The exact work and candidate directories are implementation details. The authoritative contract is the root bundle manifest.
+
+### 8.2 Bundle manifest
+
+A `StepBundleManifest` contains:
+
+```text
+schema_version
+bundle_id
+parent_bundle_id
+committed_step
+created_at_utc
+parameter store reference
+optimizer store reference
+optional gradient store reference
+batch checksum
+bundle checksum
+```
+
+Each child-store reference contains:
+
+```text
+relative path
+manifest ID
+manifest checksum
+tensor count
+chunk count
+logical bytes
+physical bytes
+```
+
+All referenced child stores must remain inside the bundle root.
+
+### 8.3 Publication protocol
+
+The root publication sequence is:
+
+1. verify candidate parameter, optimizer, and optional gradient stores;
+2. capture their current manifest IDs, checksums, counts, and byte totals;
+3. require the new committed step to advance exactly by one;
+4. write and `fsync` a candidate bundle manifest;
+5. optionally inject failure before manifest rename;
+6. atomically publish the bundle manifest;
+7. write and `fsync` a candidate root `CURRENT` pointer;
+8. optionally inject failure before root `CURRENT` rename;
+9. atomically replace root `CURRENT`;
+10. `fsync` the root directory.
+
+Candidate child stores can contain valid state before step 9. They are not the authoritative training state until the root pointer changes.
+
+### 8.4 Root recovery
+
+`StepBundleStore.recover()` verifies the current root bundle, identifies unpublished bundle manifests and temporary paths, and preserves the current authoritative bundle.
+
+Validated root failure points are:
+
+- before bundle-manifest rename;
+- before root `CURRENT` rename.
+
+Both cases must leave the previous committed bundle authoritative.
+
+## 9. Execution groups
+
+The controlled Transformer is decomposed into:
+
+```text
+embedding
+block-0
+block-1
+...
+final-head
+```
+
+An execution group contains an ordered tuple of unique logical parameter names.
+
+### 9.1 Forward group membership
+
+The forward plan includes the tied token embedding in both:
+
+- `embedding`, to map input token IDs to hidden states;
+- `final-head`, to project hidden states to vocabulary logits.
+
+The parameter is read twice but is not retained between those groups.
+
+### 9.2 Optimizer group membership
+
+The optimizer plan deduplicates parameter names across forward groups. The tied token embedding is therefore updated exactly once.
+
+## 10. Observable full-state lifecycle
+
+`storage-step` validates storage and transaction behavior before bounded execution.
+
+It performs:
 
 1. deterministic model and AdamW initialization;
 2. canonical export and initial commit;
-3. destruction of the bootstrap objects;
+3. destruction of bootstrap objects;
 4. one independently restored resident reference update;
 5. restoration of the same initial state from storage;
-6. the same forward, backward, clipping, and AdamW update;
-7. tensor-level comparison with the resident reference;
+6. forward, backward, clipping, and AdamW;
+7. tensor-level resident-versus-storage comparison;
 8. atomic publication of the updated state;
 9. restoration of the committed update;
-10. exact comparison with the state that was published.
+10. exact comparison with the published state.
 
-CPU validation requires exact bytes. MPS validation reports bitwise equality and tensor-level numerical distance separately.
+The compute phase materializes the full micro model and optimizer. This path validates lifecycle, not bounded compute.
 
-## Bounded parameter-group forward
+## 11. Bounded forward
 
-`bounded-forward` creates a parameter-only store, releases the bootstrap and resident models, and executes:
+`bounded-forward` creates a parameter-only store, releases bootstrap and resident models, and executes:
 
 ```text
-embedding weights
+embedding
   read -> materialize -> compute -> release
 
-Transformer block 0
+block 0
   read -> materialize -> compute -> release
 
-Transformer block N
+block N
   read -> materialize -> compute -> release
 
-final normalization and output projection
+final-head
   read -> materialize -> compute -> release
 ```
 
-When token embedding and output projection weights are tied, the token embedding is read again for the final group. It is not retained from the embedding group.
+The resident oracle records:
 
-The resident oracle records the embedding output, every block output, final logits, and loss. The bounded executor compares every corresponding boundary.
+- embedding output;
+- every block output;
+- final logits;
+- loss.
 
-The first implementation retains hidden activations between groups. Its bounded claim applies to managed parameter residency only.
+The bounded executor compares each corresponding boundary.
 
-## Bounded backward and the gradient store
+The current forward path retains hidden boundary activations. Its bounded claim applies to managed parameter residency.
+
+## 12. Bounded backward and gradient storage
 
 `bounded-backward` isolates reverse-mode differentiation from optimizer execution.
 
-### Forward preparation
+### 12.1 Forward preparation
 
-The executor first performs the same parameter-group forward path. It stores detached group-boundary activations in CPU memory. The parameter manifest remains immutable.
+The executor runs the bounded forward path and retains detached group-boundary activations in CPU memory. The parameter manifest remains immutable.
 
-### Reverse execution
+### 12.2 Reverse execution
 
-Groups are processed in reverse order:
+Groups execute in reverse:
 
 ```text
-final normalization and output projection
+final-head
   read parameters
   materialize saved input activation
   recompute local output
@@ -221,7 +390,7 @@ final normalization and output projection
   commit gradients
   release
 
-Transformer block N
+block N ... block 0
   read parameters
   materialize saved input and incoming gradient
   recompute local output
@@ -230,7 +399,7 @@ Transformer block N
   commit gradients
   release
 
-embedding weights
+embedding
   read parameters
   recompute embedding output
   backward with incoming gradient
@@ -238,78 +407,207 @@ embedding weights
   release
 ```
 
-Only one parameter group, one local activation, and one incoming activation gradient are intended to be accelerator-resident during each backward group.
+The intended accelerator residency is one parameter group, one local activation, and one incoming activation gradient.
 
-### Separate versioned gradient state
+### 12.3 Oracle and bounded gradient stores
 
-Resident-oracle gradients are first written to a dedicated versioned store. The resident gradient payloads and bootstrap parameter payloads are released before bounded execution begins. Bounded gradients are written to a second `VersionedTensorStore`. The parameter store is never modified.
+The path uses separate stores:
 
-Each unique parameter has one final gradient record. Tied token embeddings receive two contributions:
+- immutable parameter store;
+- resident-oracle gradient store;
+- bounded gradient store.
 
-1. output-head contribution, stored at gradient version 0;
-2. embedding contribution, added to the existing value and stored at version 1.
+The resident gradient payloads are released before bounded execution.
 
-This version history makes tied-gradient accumulation explicit and traceable.
+### 12.4 Tied-gradient versioning
 
-### Global gradient norm
+The tied token embedding receives two contributions:
 
-After all groups complete, the oracle and bounded gradient stores are streamed independently to calculate their global norms. The complete states are loaded together only for the final tensor-level validation comparison. The result includes the clipping coefficient that a later optimizer phase would apply. Version 0.7 does not update parameters.
+1. the final-head contribution is stored at gradient version 0;
+2. the embedding contribution is added and stored at gradient version 1.
 
-The complete final gradient state is materialized after bounded execution only for tensor-level validation against the resident oracle. The result reports this validation-only materialization explicitly.
+The final bounded gradient store contains one final gradient record for each unique parameter.
 
-### Bounded backward telemetry
+### 12.5 Global norm
 
-Every backward group records:
+Oracle and bounded gradient stores are streamed independently to calculate their global norms without materializing all gradients together.
 
-- reverse ordinal and group name;
-- parameter tensor names and bytes;
-- referenced chunk count;
+The canonical clipping coefficient is:
+
+```text
+clip = min(1, max_norm / (global_norm + 1e-6))
+```
+
+The complete oracle and bounded gradient states are loaded together only after bounded execution for tensor-level validation.
+
+## 13. Group-bounded AdamW
+
+`bounded-step` first runs the validated bounded-backward path. It then creates zero-initialized AdamW state and publishes root bundle step 0.
+
+For every unique optimizer group it reads:
+
+- parameter tensors;
+- final gradient tensors;
+- first-moment tensors;
+- second-moment tensors;
+- optimizer step tensors.
+
+It then:
+
+1. materializes the group on the selected device;
+2. multiplies gradients by the canonical clipping coefficient;
+3. restores group-local AdamW state;
+4. executes AdamW with deterministic reference semantics;
+5. exports updated parameters and optimizer state;
+6. commits version 1 tensors to candidate stores;
+7. releases group payloads and device objects;
+8. records memory, timing, checksum, and storage telemetry.
+
+After every group completes:
+
+1. candidate parameter and optimizer stores verify;
+2. the complete candidate state is compared with a resident oracle;
+3. the candidate state is restored into a fresh model and optimizer;
+4. the restored state is re-exported and compared exactly;
+5. the root step-1 bundle is published;
+6. root and child stores verify.
+
+Complete candidate and oracle states are materialized together only for final validation.
+
+## 14. Working-set budgets
+
+### 14.1 Tensor-store budgets
+
+`StoreLimits` defines:
+
+- chunk size;
+- maximum managed storage bytes;
+- maximum internal staging bytes.
+
+### 14.2 Parameter budget
+
+Maximum logical parameter bytes materialized for one forward, backward, or optimizer group.
+
+### 14.3 Gradient budget
+
+Maximum logical final-gradient bytes materialized for one backward or optimizer group.
+
+### 14.4 Optimizer budget
+
+Maximum combined logical bytes for:
+
+```text
+parameter
++ gradient
++ first moment
++ second moment
++ step tensor
+```
+
+A group is rejected before optimizer compute when this sum exceeds the configured limit.
+
+### 14.5 Budget interpretation
+
+Logical working-set budgets do not include all physical memory. Activations, temporary kernels, allocator caches, RSS, page cache, and operating-system overhead remain separate measurements.
+
+## 15. Correctness model
+
+### 15.1 CPU exactness
+
+CPU reference tests require exact canonical state for:
+
+- parameters;
+- first moments;
+- second moments;
+- optimizer step tensors;
+- optimizer parameter-group metadata;
+- candidate restore.
+
+The resident oracle and group-bounded path use the same canonical clipping coefficient and reference AdamW mode.
+
+### 15.2 MPS numerical validation
+
+MPS target tests report raw loss, gradient-norm, parameter, and optimizer-state differences. Bitwise equality and numerical agreement remain distinct properties.
+
+### 15.3 Validation-only materialization
+
+Result fields explicitly report when complete gradient or candidate state is materialized after bounded execution for validation.
+
+## 16. Telemetry
+
+### 16.1 Tensor-store telemetry
+
+- logical and physical bytes read or written;
+- chunk reads and writes;
+- chunk reuse;
+- checksum time;
+- read and write time;
+- `fsync` time;
+- manifest publication time;
+- recovery time and actions;
+- current store size;
+- cumulative managed-state writes.
+
+### 16.2 Bounded forward telemetry
+
+- group tensor names and parameter bytes;
+- referenced chunks;
+- read, materialization, compute, and release time;
 - input and output activation bytes;
-- incoming and outgoing activation-gradient bytes;
-- parameter read and materialization time;
-- local recomputation and backward time;
-- gradient extraction and commit time;
-- logical and physical gradient bytes written;
-- chunk writes and reuse;
-- release time;
-- local gradient and upstream-gradient checksums;
+- boundary checksums and numerical differences;
 - RSS, accelerator allocation, and driver allocation.
 
-The complete run reports:
+### 16.3 Bounded backward telemetry
 
-- parameter, oracle-gradient, and bounded-gradient manifest IDs;
-- batch checksum;
-- resident and bounded loss;
-- resident and bounded global gradient norm;
-- retained CPU activation bytes;
-- maximum parameter and gradient group bytes;
-- total parameter reads and gradient writes;
-- tied-gradient accumulation count and version;
-- final tensor-level gradient comparison;
-- parameter-manifest immutability;
-- store verification results.
+- reverse group order;
+- local activation and activation-gradient bytes;
+- parameter read, recomputation, backward, extraction, commit, and release time;
+- gradient logical and physical writes;
+- chunk reuse;
+- local and upstream-gradient checksums;
+- RSS, accelerator allocation, and driver allocation.
 
-## Bounded AdamW and atomic step bundles
+### 16.4 Optimizer telemetry
 
-`bounded-step` first executes the validated bounded backward path. It then publishes an initial root bundle that references immutable parameter and zero-initialized AdamW stores. For each unique execution group it reads parameters, final gradients, first moments, second moments, and step tensors; applies the shared clipping coefficient; executes AdamW; writes candidate parameter and optimizer versions; and releases the group.
+- parameter, gradient, first-moment, second-moment, and step bytes;
+- complete group working-set bytes;
+- state read, materialization, AdamW, export, commit, and release time;
+- parameter and optimizer logical and physical writes;
+- chunk writes and reuse;
+- updated parameter and optimizer checksums;
+- RSS, accelerator allocation, and driver allocation before and after release.
 
-The tied token embedding appears in both the embedding and final-head execution plans, but it is updated only once because optimizer groups deduplicate parameter names. Candidate child stores may advance while they are built, but the authoritative training state remains the root bundle at step 0 until every candidate store verifies and the step-1 bundle `CURRENT` pointer is replaced atomically.
+### 16.5 Root publication telemetry
 
-CPU validation compares all parameters, moments, steps, and optimizer metadata exactly with a resident PyTorch oracle. Complete candidate and oracle states are materialized together only after bounded execution for validation.
+- bundle-manifest `fsync` and rename time;
+- root `CURRENT` `fsync` and rename time;
+- metadata bytes written;
+- parent and child bundle lineage;
+- verification and recovery results.
 
-## Development scale ladder
+Filesystem metadata, APFS copy-on-write amplification, controller behavior, and NAND-level writes are not inferred from these application counters.
 
-1. **Unit scale**. Bytes, arrays, operators, corruption, and failure injection.
-2. **Micro model**. A sub-million-parameter Transformer for each complete runtime path.
-3. **Small real training**. A few-million-parameter model on a real text corpus with validation, checkpoint, resume, and sample generation.
-4. **Milestone scale**. Larger runs after the same path is correct at smaller scales.
-5. **Capacity demonstrations**. 124M, 350M, and larger targets after bounded storage-backed training exists.
+## 17. Validated target results
 
-Small models accelerate iteration. They do not replace real training or larger-than-resident demonstrations.
+### 17.1 Version 0.5
 
-## CLI
+A clean MacBook Air M2 run validated exact storage lifecycle, exact MLX round trips, all five tensor-store failure points, exact PyTorch storage-backed state for the tested paths, and zero swap growth.
 
-Create and inspect a store:
+### 17.2 Version 0.6
+
+A clean M2 run validated micro and tiny bounded forward. Maximum boundary, logits, and loss differences were zero. The largest tiny parameter group was `788,480` bytes under a `1,048,576` byte budget.
+
+### 17.3 Version 0.7
+
+A clean M2 run validated bounded backward, exact final gradients for the tested paths, tied-gradient version 1, streamed global norm, parameter and gradient budget rejection, three-store recovery, and zero swap growth.
+
+### 17.4 Version 0.8
+
+CPU CI on Python 3.11 and 3.13 validates exact resident-versus-candidate state, exact candidate restore, optimizer working-set rejection, bundle checksum validation, and failure recovery. Target MPS validation is pending.
+
+## 18. CLI
+
+Create and inspect a tensor store:
 
 ```bash
 microcolossus store-init \
@@ -322,7 +620,7 @@ microcolossus store-verify --path runs/store
 microcolossus store-recover --path runs/store
 ```
 
-Run the observable optimizer lifecycle:
+Run the observable full-state lifecycle:
 
 ```bash
 microcolossus storage-step \
@@ -370,48 +668,46 @@ microcolossus bounded-step \
   --optimizer-working-set-mib 4
 ```
 
-## Validated target-hardware results
+Every command that creates a store or bundle requires a new destination directory.
 
-### Version 0.5
+## 19. Current limitations
 
-A clean MacBook Air M2 run validated the storage-backed optimizer lifecycle, exact MLX round trips, all five failure-injection points, and zero resident-versus-storage differences for the tested PyTorch paths.
-
-### Version 0.6
-
-A clean MacBook Air M2 run with 8 GB unified memory validated commit `1feea9f9eef28e551ad4ae4944614083effa804f`:
-
-- Ruff, mypy, 56 tests, and compileall passed;
-- two micro bounded-forward runs were GREEN and bitwise exact;
-- the 443,648-parameter tiny bounded-forward run was GREEN;
-- group order and tied-embedding reload behavior were correct;
-- the largest micro group used `33,280` bytes;
-- the largest tiny group used `788,480` bytes;
-- both stayed below a `1,048,576` byte parameter budget;
-- every boundary, final logits, and loss matched the resident oracle exactly;
-- budget rejection passed;
-- parameter manifests remained unchanged;
-- stores verified and recovered;
-- no fallback, unsupported operation, non-finite value, allocation failure, or swap growth was detected;
-- the repository remained clean.
-
-Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes.
-
-### Version 0.7
-
-A clean target run validated two bitwise-exact micro bounded-backward executions and one GREEN tiny execution. Loss and tensor-gradient differences were zero, the maximum global-norm difference was approximately `9.57e-08`, tied-gradient versioning and both budget rejections passed, all three stores verified and recovered, swap growth was zero, and the repository remained clean.
-
-## Current boundary
-
-MicroColossus does not yet establish:
+The current implementation does not yet provide:
 
 - multiple consecutive bounded optimizer steps;
-- checkpoint and resume for the bounded runtime;
-- activation recomputation from storage or activation offload;
+- reuse of a prior committed root bundle as the next step input;
+- checkpoint and resume across process restart;
+- dataset cursor and RNG restoration;
+- activation recomputation from storage;
+- activation offload;
+- strict total-memory-pressure enforcement;
 - asynchronous prefetch or writeback;
 - intra-layer tiling;
-- MLX bounded backward;
-- direct I/O or compression;
+- bounded MLX backward or optimizer execution;
+- direct I/O, compression, or storage-specific tuning;
 - real-corpus language-model training;
-- training state larger than safe resident unified memory.
+- a demonstrated state larger than safe resident unified memory.
 
-The next hardware gate validates the 0.8 bounded-step path on MPS. After that, development moves to repeated bounded steps, checkpoint/resume, and then activation recomputation or offload.
+## 20. Next design milestone
+
+The next runtime milestone is consecutive bounded training steps.
+
+The intended sequence is:
+
+```text
+open authoritative root bundle N
+        |
+read its parameter and optimizer child manifests
+        |
+execute bounded forward, backward, norm, clipping, and AdamW
+        |
+build candidate child stores for N + 1
+        |
+verify and publish root bundle N + 1
+        |
+persist batch cursor, RNG state, and schedule state
+        |
+allow process exit and exact resume
+```
+
+This milestone must also define retention and garbage-collection rules for obsolete manifests, candidate stores, gradients, and chunks without deleting state required for recovery.
