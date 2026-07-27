@@ -15,6 +15,11 @@ from .bounded_optimizer import (
     OptimizerWorkingSetExceededError,
     run_bounded_optimizer_step,
 )
+from .bounded_training import (
+    BoundedTrainingResult,
+    ResumeConfigurationError,
+    run_bounded_training,
+)
 from .config import ExperimentConfig, HardwareBudget, ModelConfig, TrainingConfig
 from .model import DecoderOnlyTransformer
 from .planner import MemoryPlan, build_static_plan
@@ -26,6 +31,7 @@ __all__ = [
     "BoundedBackwardResult",
     "BoundedForwardResult",
     "BoundedOptimizerResult",
+    "BoundedTrainingResult",
     "DecoderOnlyTransformer",
     "ExperimentConfig",
     "GradientWorkingSetExceededError",
@@ -33,6 +39,7 @@ __all__ = [
     "MemoryPlan",
     "ModelConfig",
     "OptimizerWorkingSetExceededError",
+    "ResumeConfigurationError",
     "StepBundleStore",
     "StorageBackedStepResult",
     "StoreLimits",
@@ -43,7 +50,8 @@ __all__ = [
     "run_bounded_backward",
     "run_bounded_forward",
     "run_bounded_optimizer_step",
+    "run_bounded_training",
     "run_observable_storage_step",
 ]
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
