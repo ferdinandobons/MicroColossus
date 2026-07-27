@@ -56,3 +56,9 @@ jobs:
             --max-storage-gib 0.01
           microcolossus store-verify --path /tmp/microcolossus-store
           microcolossus store-recover --path /tmp/microcolossus-store
+          microcolossus storage-step \
+            --config examples/micro-storage.yaml \
+            --store /tmp/microcolossus-storage-step-store \
+            --output /tmp/microcolossus-storage-step.json \
+            --device cpu
+          microcolossus store-verify --path /tmp/microcolossus-storage-step-store
