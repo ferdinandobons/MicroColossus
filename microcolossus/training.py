@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from dataclasses import asdict, dataclass, replace
@@ -116,11 +117,14 @@ def make_synthetic_lm_batch(
 
 
 def _gradient_norm(model: nn.Module) -> float:
-    squared_norm = torch.zeros((), dtype=torch.float64)
+    """Calculate the global gradient norm without creating float64 MPS tensors."""
+
+    squared_norms: list[float] = []
     for parameter in model.parameters():
         if parameter.grad is not None:
-            squared_norm += parameter.grad.detach().double().pow(2).sum().cpu()
-    return float(torch.sqrt(squared_norm).item())
+            squared_sum = parameter.grad.detach().float().pow(2).sum()
+            squared_norms.append(float(squared_sum.cpu().item()))
+    return math.sqrt(math.fsum(squared_norms))
 
 
 def run_resident_step(
