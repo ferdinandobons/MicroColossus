@@ -34,6 +34,12 @@ jobs:
           name: mypy-${{ matrix.python-version }}
           path: mypy-${{ matrix.python-version }}.txt
           if-no-files-found: error
+      - name: Upload bounded-backward source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounded-backward-source-${{ matrix.python-version }}
+          path: microcolossus/bounded_backward.py
+          if-no-files-found: error
       - name: Test
         run: python -m pytest
       - name: Compile
