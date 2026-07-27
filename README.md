@@ -2,67 +2,50 @@
 
 > **Trade memory for time.**
 
-MicroColossus is an experimental open-source project exploring how to train generative models whose complete training state does not fit in local GPU memory or within a strict host RAM budget.
+MicroColossus is an experimental open-source project exploring how to train generative models when the complete training state does not fit comfortably inside the available memory.
 
-The long-term design treats VRAM, RAM, and NVMe storage as an explicit hierarchy. The intended runtime keeps only the active working set in VRAM, streams tensor chunks through bounded RAM buffers, recomputes selected activations, and tiles operations that are too large to execute as a whole.
+The current primary target is **Apple Silicon, starting with an 8 GB Mac M2 using PyTorch's Metal Performance Shaders backend**.
+
+## Why focus on Apple Silicon
+
+Apple Silicon uses unified memory. CPU tensors, MPS tensors, framework allocations, and the operating system compete for the same physical memory pool. This changes the project design:
+
+- CPU-to-MPS movement is a placement and execution decision, not a free capacity offload;
+- process RSS, MPS tensor allocation, and Metal driver allocation overlap and must not be added as if they were separate memories;
+- storage offload, recomputation, bounded working sets, and intra-layer tiling become the main mechanisms for exceeding resident-memory capacity;
+- every result must report the full memory and I/O cost.
+
+MicroColossus does not claim that hardware limits disappear. It aims to make those limits explicit and schedule around them where practical.
 
 ## Current status
 
-MicroColossus is in its first executable milestone.
+The repository contains an executable resident baseline, not an out-of-core runtime.
 
-Implemented now:
+Implemented:
 
-- a typed YAML experiment configuration;
-- a controlled decoder-only Transformer reference model;
-- a reproducible resident AdamW training baseline;
-- a static memory estimator for model state and an illustrative streamed working set;
-- JSON and JSONL experiment artifacts;
-- process RAM and CUDA peak-allocation telemetry;
-- model-state checksums for reproducibility checks;
-- a command-line interface;
-- automated tests and a GitHub Actions workflow.
+- typed YAML experiment configuration;
+- a controlled decoder-only Transformer;
+- full-parameter resident AdamW training;
+- `cpu`, `mps`, `cuda`, and `auto` device selection;
+- automatic preference for MPS when it is available;
+- MPS environment diagnostics;
+- MPS current tensor allocation, driver allocation, and recommended working-set telemetry;
+- NumPy-independent model-state checksums;
+- a static memory estimator with unified-memory warnings;
+- JSON and JSONL run artifacts;
+- tests, linting, type checking, compilation, and CPU smoke checks in CI.
 
-Not implemented yet:
+Not implemented:
 
-- RAM-to-VRAM layer streaming;
-- NVMe-backed tensor state;
-- activation offloading or recomputation policies;
+- storage-backed model or optimizer state;
+- bounded NVMe-to-MPS streaming;
+- activation offloading or planned recomputation;
 - asynchronous prefetch and writeback;
 - intra-layer tiling;
-- crash-safe optimizer updates and checkpoint recovery;
-- validated training of a model larger than resident memory.
+- crash-safe step publication and recovery;
+- training of state larger than available unified memory.
 
-No performance or model-scale result is claimed at this stage.
-
-## Why the project exists
-
-Training requires more than model weights. A full-parameter step may also require gradients, optimizer states, master-weight copies, activations, temporary tensors, and kernel workspaces. On modest hardware, memory capacity can make an experiment impossible before compute time becomes the main constraint.
-
-MicroColossus asks:
-
-> Can a mathematically valid full-parameter update be executed when the complete model state fits only in storage, while active computation remains inside strict VRAM and RAM budgets?
-
-The project does not attempt to make models literally infinite or to match datacenter throughput. It investigates how much resident memory can be exchanged for additional I/O, recomputation, and elapsed time, while exposing the complete cost of that exchange.
-
-## Intended memory hierarchy
-
-```text
-GPU compute
-    |
-VRAM cache and active working set
-    |
-Bounded host RAM cache and staging buffers
-    |
-Versioned NVMe tensor store
-```
-
-The first hardware target is deliberately constrained:
-
-- one CUDA GPU with 8 GB of VRAM;
-- 8 GB of installed system RAM, with a smaller hard budget for the process;
-- one consumer NVMe SSD;
-- one controlled decoder-only Transformer architecture;
-- a full-parameter reference path before approximate methods are introduced.
+No performance or model-scale claim is made yet.
 
 ## Install
 
@@ -81,102 +64,96 @@ On Windows PowerShell:
 .venv\Scripts\Activate.ps1
 ```
 
-## Run the current prototype
-
-Build a static memory plan:
+## Inspect the machine
 
 ```bash
-microcolossus plan --config examples/tiny-resident.yaml
+microcolossus doctor
 ```
 
-Run the resident numerical baseline:
+On a compatible Mac, the report should distinguish whether PyTorch was built with MPS and whether MPS is available at runtime.
+
+## Run the M2-oriented prototype
+
+Build the MPS-oriented static plan:
+
+```bash
+microcolossus plan --config examples/tiny-mps.yaml
+```
+
+Run the resident baseline on MPS:
+
+```bash
+microcolossus train --config examples/tiny-mps.yaml
+```
+
+Run the portable resident example with automatic device selection:
 
 ```bash
 microcolossus train --config examples/tiny-resident.yaml
 ```
 
-Override steps or execution device:
+Force a device or override the number of steps:
 
 ```bash
 microcolossus train \
   --config examples/tiny-resident.yaml \
   --steps 10 \
-  --device cpu
+  --device mps
 ```
 
-The package can also be invoked without the installed console script:
+An explicit `mps` request fails clearly when the installed PyTorch build or machine cannot provide MPS. The project does not silently enable CPU fallback for unsupported MPS operations.
+
+## Run the checks
 
 ```bash
-python -m microcolossus plan --config examples/tiny-resident.yaml
-python -m microcolossus train --config examples/tiny-resident.yaml
-```
-
-Run the checks:
-
-```bash
+ruff check .
+mypy microcolossus
 python -m pytest
-python -m ruff check .
 python -m compileall -q microcolossus
 ```
 
 ## Experiment artifacts
 
-The example configuration writes into `runs/tiny-resident/`:
+Each training run writes:
 
 ```text
-runs/tiny-resident/
+runs/<experiment>/
   resolved-config.json
   memory-plan.json
   steps.jsonl
   summary.json
 ```
 
-`steps.jsonl` is replaced at the start of each new run in the same output directory. This prevents telemetry from separate executions being mixed silently.
+For MPS, each step records:
 
-## Current commands
+- process RSS;
+- MPS current tensor allocation;
+- total memory allocated by the Metal driver for the process;
+- PyTorch's recommended maximum MPS working set;
+- synchronized step duration;
+- loss, gradient norm, and model checksum.
 
-### `microcolossus plan`
+The current MPS allocation is not a measured peak. The telemetry labels the measurement kind explicitly.
 
-The planner currently reports:
+## Development direction
 
-- parameter count and parameter bytes;
-- gradient, Adam-state, and optional master-weight bytes;
-- an illustrative persistent resident-state estimate;
-- a heuristic activation estimate;
-- the largest execution-group parameter size;
-- heuristic streamed VRAM and RAM working-set estimates;
-- configured VRAM, process RAM, and NVMe budgets;
-- basic capacity checks and explicit warnings.
+The next implementation path is:
 
-The planner does not move tensors, enforce budgets, estimate real throughput, or guarantee that the streamed design is executable.
+1. validate the resident baseline on a real Mac M2;
+2. measure unified-memory behavior and operator compatibility;
+3. create a versioned NVMe tensor store;
+4. execute a bounded synchronous NVMe-to-MPS working set;
+5. add activation recomputation and strict budget enforcement;
+6. overlap storage, CPU preparation, and MPS execution;
+7. tile operations that cannot fit as a whole.
 
-### `microcolossus train`
-
-The training command runs the fully resident reference implementation on deterministic synthetic next-token batches. It performs forward, cross-entropy, backward, gradient-norm measurement, optional gradient clipping, and AdamW update.
-
-The resident path exists to become the numerical oracle for future streamed execution.
-
-## Development path
-
-The next milestone is synchronous RAM-to-VRAM layer streaming with numerical comparison against the resident baseline. NVMe storage will be introduced only after the layer-wise execution model is correct and measurable.
-
-Planned order:
-
-1. resident reference baseline and static planner;
-2. RAM-to-VRAM layer streaming;
-3. versioned NVMe tensor store;
-4. synchronous NVMe execution;
-5. asynchronous overlap and bounded caches;
-6. intra-layer tiling;
-7. constrained-hardware demonstrations around 350 million parameters, followed by investigation of larger targets.
-
-Targets beyond the implemented baseline are research goals, not promised results.
+A CPU-owned copy of the complete model is not considered a solution on Apple Silicon because it still occupies the same unified-memory pool.
 
 ## Documentation
 
-The complete motivation, architecture, implementation ledger, validation contract, roadmap, and technical risks are maintained in one document:
-
 - [Project specification](docs/project.md)
+- [Validation ledger](docs/validation.md)
+- [PyTorch MPS backend documentation](https://docs.pytorch.org/docs/stable/notes/mps.html)
 
 ## License
 

@@ -1,4 +1,4 @@
-"""Configuration models and YAML loading for the initial prototype."""
+"""Configuration models and YAML loading for MicroColossus experiments."""
 
 from __future__ import annotations
 
@@ -82,8 +82,8 @@ class TrainingConfig:
             raise ValueError("weight_decay cannot be negative")
         if self.gradient_clip_norm is not None:
             _positive(self.gradient_clip_norm, "gradient_clip_norm")
-        if self.device not in {"auto", "cpu", "cuda"}:
-            raise ValueError("device must be one of: auto, cpu, cuda")
+        if self.device not in {"auto", "cpu", "cuda", "mps"}:
+            raise ValueError("device must be one of: auto, cpu, cuda, mps")
         if self.mode != "reference":
             raise ValueError("only reference mode is implemented")
 
@@ -94,25 +94,43 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class HardwareBudget:
-    """Hard budget targets consumed by the static planner."""
+    """Logical memory and storage budgets consumed by the static planner.
 
-    vram_gib: float = 8.0
+    On Apple Silicon, accelerator and process-memory budgets share one physical
+    unified-memory pool. They are logical guardrails and must not be added.
+    """
+
+    accelerator_memory_gib: float = 8.0
     process_ram_gib: float = 5.0
     nvme_gib: float = 100.0
     ssd_write_budget_tb: float = 100.0
+    memory_architecture: str = "auto"
+    system_memory_gib: float | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
-            (self.vram_gib, "vram_gib"),
+            (self.accelerator_memory_gib, "accelerator_memory_gib"),
             (self.process_ram_gib, "process_ram_gib"),
             (self.nvme_gib, "nvme_gib"),
             (self.ssd_write_budget_tb, "ssd_write_budget_tb"),
         ):
             _positive(value, name)
+        if self.memory_architecture not in {"auto", "discrete", "unified"}:
+            raise ValueError("memory_architecture must be one of: auto, discrete, unified")
+        if self.system_memory_gib is not None:
+            _positive(self.system_memory_gib, "system_memory_gib")
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> HardwareBudget:
-        return cls(**dict(values))
+        normalized = dict(values)
+        legacy_vram = normalized.pop("vram_gib", None)
+        if legacy_vram is not None:
+            if "accelerator_memory_gib" in normalized:
+                raise ValueError(
+                    "hardware cannot define both vram_gib and accelerator_memory_gib"
+                )
+            normalized["accelerator_memory_gib"] = legacy_vram
+        return cls(**normalized)
 
 
 @dataclass(frozen=True)

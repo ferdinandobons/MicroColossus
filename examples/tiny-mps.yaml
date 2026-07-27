@@ -1,5 +1,5 @@
-name: tiny-resident
-output_dir: runs/tiny-resident
+name: tiny-mps
+output_dir: runs/tiny-mps
 
 model:
   vocab_size: 256
@@ -21,11 +21,12 @@ training:
   weight_decay: 0.1
   gradient_clip_norm: 1.0
   seed: 42
-  device: auto
+  device: mps
 
 hardware:
-  accelerator_memory_gib: 8.0
+  accelerator_memory_gib: 5.0
   process_ram_gib: 5.0
+  system_memory_gib: 8.0
   nvme_gib: 100.0
   ssd_write_budget_tb: 100.0
-  memory_architecture: auto
+  memory_architecture: unified

@@ -1,17 +1,28 @@
-"""Small telemetry primitives shared by training and planning."""
+"""Telemetry primitives shared by training, planning, and diagnostics."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-from dataclasses import asdict, is_dataclass
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psutil
 import torch
 from torch import Tensor, nn
+
+
+@dataclass(frozen=True)
+class AcceleratorMemoryMetrics:
+    """One synchronized accelerator-memory sample."""
+
+    measurement_kind: str
+    allocated_bytes: int
+    driver_allocated_bytes: int
+    recommended_max_bytes: int
 
 
 def process_rss_bytes() -> int:
@@ -20,26 +31,69 @@ def process_rss_bytes() -> int:
     return int(psutil.Process(os.getpid()).memory_info().rss)
 
 
-def peak_vram_bytes(device: torch.device) -> int:
-    """Return CUDA peak allocation for the current measurement window."""
-
-    if device.type != "cuda":
+def _call_int(namespace: object, name: str) -> int:
+    function = getattr(namespace, name, None)
+    if not callable(function):
         return 0
-    return int(torch.cuda.max_memory_allocated(device))
+    return int(function())
 
 
-def reset_peak_vram(device: torch.device) -> None:
-    """Reset CUDA peak allocation when CUDA is active."""
+def accelerator_memory_metrics(device: torch.device) -> AcceleratorMemoryMetrics:
+    """Measure accelerator memory using backend-specific public APIs.
+
+    CUDA reports the peak tensor allocation since the last reset. MPS exposes a
+    synchronized current allocation rather than a resettable peak, plus the
+    total allocation attributed to the Metal driver and its recommended working
+    set. These measurements are not directly interchangeable.
+    """
+
+    if device.type == "cuda":
+        properties = torch.cuda.get_device_properties(device)
+        return AcceleratorMemoryMetrics(
+            measurement_kind="cuda-peak-allocated",
+            allocated_bytes=int(torch.cuda.max_memory_allocated(device)),
+            driver_allocated_bytes=0,
+            recommended_max_bytes=int(properties.total_memory),
+        )
+    if device.type == "mps":
+        return AcceleratorMemoryMetrics(
+            measurement_kind="mps-current-allocated",
+            allocated_bytes=_call_int(torch.mps, "current_allocated_memory"),
+            driver_allocated_bytes=_call_int(torch.mps, "driver_allocated_memory"),
+            recommended_max_bytes=_call_int(torch.mps, "recommended_max_memory"),
+        )
+    return AcceleratorMemoryMetrics(
+        measurement_kind="none",
+        allocated_bytes=0,
+        driver_allocated_bytes=0,
+        recommended_max_bytes=0,
+    )
+
+
+def reset_accelerator_memory(device: torch.device) -> None:
+    """Reset a backend peak counter when the backend exposes one."""
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
 
+def synchronize_accelerator(device: torch.device) -> None:
+    """Wait for asynchronous accelerator work before timing or sampling."""
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
 def _tensor_bytes(tensor: Tensor) -> bytes:
+    """Return exact logical tensor bytes without requiring NumPy."""
+
     value = tensor.detach().cpu().contiguous()
-    if value.dtype == torch.bfloat16:
-        return value.view(torch.int16).numpy().tobytes()
-    return value.numpy().tobytes()
+    byte_view = value.view(torch.uint8)
+    storage = bytes(cast(Iterable[int], byte_view.untyped_storage()))
+    start = byte_view.storage_offset()
+    return storage[start : start + byte_view.numel()]
 
 
 def model_checksum(model: nn.Module) -> str:
@@ -54,12 +108,18 @@ def model_checksum(model: nn.Module) -> str:
     return digest.hexdigest()
 
 
+def _json_serializable(value: Any) -> Any:
+    if not isinstance(value, type) and is_dataclass(value):
+        return asdict(cast(Any, value))
+    return value
+
+
 def write_json_atomic(path: str | Path, value: Any) -> None:
     """Write JSON through a temporary file and atomic rename."""
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    serializable = asdict(value) if is_dataclass(value) else value
+    serializable = _json_serializable(value)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(serializable, handle, indent=2, sort_keys=True)
@@ -77,7 +137,7 @@ class JsonlWriter:
             self.path.unlink(missing_ok=True)
 
     def append(self, value: Any) -> None:
-        serializable = asdict(value) if is_dataclass(value) else value
+        serializable = _json_serializable(value)
         with self.path.open("a", encoding="utf-8") as handle:
             json.dump(serializable, handle, sort_keys=True)
             handle.write("\n")

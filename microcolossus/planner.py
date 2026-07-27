@@ -1,4 +1,4 @@
-"""Static memory estimator for the first MicroColossus milestone."""
+"""Static memory estimator for the first MicroColossus milestones."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ class MemoryPlan:
     """Approximate memory report. It is not a runtime guarantee."""
 
     estimate_kind: str
+    memory_architecture: str
     parameter_count: int
     parameter_bytes: int
     gradient_bytes: int
@@ -26,13 +27,14 @@ class MemoryPlan:
     resident_persistent_bytes: int
     estimated_saved_activation_bytes: int
     largest_layer_parameter_bytes: int
-    estimated_streamed_vram_peak_bytes: int
+    estimated_streamed_accelerator_peak_bytes: int
     estimated_streamed_ram_peak_bytes: int
-    vram_budget_bytes: int
+    accelerator_memory_budget_bytes: int
     process_ram_budget_bytes: int
+    system_memory_budget_bytes: int | None
     nvme_budget_bytes: int
-    resident_fits_vram_budget: bool
-    streamed_working_set_fits_vram_budget: bool
+    resident_fits_accelerator_budget: bool
+    streamed_working_set_fits_accelerator_budget: bool
     streamed_working_set_fits_ram_budget: bool
     model_state_fits_nvme_budget: bool
     warnings: tuple[str, ...]
@@ -51,14 +53,30 @@ def _parameter_bytes(model: nn.Module) -> int:
 
 def _largest_execution_group_bytes(model: nn.Module) -> int:
     groups: list[int] = []
-    if hasattr(model, "blocks"):
-        blocks = model.blocks  # type: ignore[attr-defined]
+    blocks = getattr(model, "blocks", None)
+    if isinstance(blocks, nn.ModuleList):
         groups.extend(_parameter_bytes(block) for block in blocks)
     for module_name in ("token_embedding", "position_embedding", "final_norm", "lm_head"):
         module = getattr(model, module_name, None)
         if isinstance(module, nn.Module):
             groups.append(_parameter_bytes(module))
     return max(groups, default=_parameter_bytes(model))
+
+
+def _mps_available() -> bool:
+    backend = getattr(torch.backends, "mps", None)
+    return bool(backend is not None and backend.is_available())
+
+
+def _resolve_memory_architecture(config: ExperimentConfig) -> str:
+    configured = config.hardware.memory_architecture
+    if configured != "auto":
+        return configured
+    if config.training.device == "mps":
+        return "unified"
+    if config.training.device == "auto" and _mps_available():
+        return "unified"
+    return "discrete"
 
 
 def build_static_plan(model: nn.Module, config: ExperimentConfig) -> MemoryPlan:
@@ -73,7 +91,7 @@ def build_static_plan(model: nn.Module, config: ExperimentConfig) -> MemoryPlan:
     )
     parameter_bytes = _parameter_bytes(model)
     gradient_bytes = parameter_bytes
-    optimizer_state_bytes = parameter_count * 8  # Adam first and second moments in FP32.
+    optimizer_state_bytes = parameter_count * 8
     master_weight_bytes = sum(
         parameter.numel() * 4
         for parameter in model.parameters()
@@ -91,8 +109,6 @@ def build_static_plan(model: nn.Module, config: ExperimentConfig) -> MemoryPlan:
         * model_config.hidden_size
         * model_config.layers
     )
-    # The multiplier accounts for block inputs, normalized inputs, attention/MLP
-    # intermediates, and conservative overhead. It is deliberately labeled heuristic.
     estimated_saved_activation_bytes = activation_elements * 4 * 8
 
     largest_layer_parameter_bytes = _largest_execution_group_bytes(model)
@@ -104,14 +120,21 @@ def build_static_plan(model: nn.Module, config: ExperimentConfig) -> MemoryPlan:
         * 8
     )
     transfer_buffers = largest_layer_parameter_bytes * 2
-    estimated_streamed_vram_peak_bytes = (
+    estimated_streamed_accelerator_peak_bytes = (
         largest_layer_parameter_bytes + one_block_activation_bytes + transfer_buffers
     )
     estimated_streamed_ram_peak_bytes = transfer_buffers + largest_layer_parameter_bytes
 
-    vram_budget_bytes = int(config.hardware.vram_gib * GIB)
-    process_ram_budget_bytes = int(config.hardware.process_ram_gib * GIB)
-    nvme_budget_bytes = int(config.hardware.nvme_gib * GIB)
+    hardware = config.hardware
+    memory_architecture = _resolve_memory_architecture(config)
+    accelerator_memory_budget_bytes = int(hardware.accelerator_memory_gib * GIB)
+    process_ram_budget_bytes = int(hardware.process_ram_gib * GIB)
+    system_memory_budget_bytes = (
+        int(hardware.system_memory_gib * GIB)
+        if hardware.system_memory_gib is not None
+        else None
+    )
+    nvme_budget_bytes = int(hardware.nvme_gib * GIB)
 
     warnings = [
         "Activation and workspace estimates are heuristic and must be replaced by measured peaks.",
@@ -119,13 +142,26 @@ def build_static_plan(model: nn.Module, config: ExperimentConfig) -> MemoryPlan:
         "or asynchronous overlap.",
         "A feasible capacity estimate does not imply acceptable throughput.",
     ]
-    if torch.cuda.is_available() and config.training.device == "cpu":
-        warnings.append(
-            "CUDA is available but this configuration explicitly selects CPU execution."
+    if memory_architecture == "unified":
+        warnings.extend(
+            [
+                "Apple Silicon CPU and MPS allocations share unified physical memory; "
+                "accelerator and process budgets are overlapping logical guardrails.",
+                "Process RSS, MPS current allocation, and MPS driver allocation cannot be "
+                "summed to infer total physical memory use.",
+                "CPU-to-MPS placement alone is not a capacity offload mechanism on unified memory.",
+            ]
         )
+        if system_memory_budget_bytes is None:
+            warnings.append(
+                "No system_memory_gib value was configured for this unified-memory plan."
+            )
+    if config.training.device == "mps" and not _mps_available():
+        warnings.append("MPS was requested but is not available in the current environment.")
 
     return MemoryPlan(
-        estimate_kind="static-model-plus-heuristics-v0",
+        estimate_kind="static-model-plus-heuristics-v1",
+        memory_architecture=memory_architecture,
         parameter_count=parameter_count,
         parameter_bytes=parameter_bytes,
         gradient_bytes=gradient_bytes,
@@ -134,16 +170,18 @@ def build_static_plan(model: nn.Module, config: ExperimentConfig) -> MemoryPlan:
         resident_persistent_bytes=resident_persistent_bytes,
         estimated_saved_activation_bytes=estimated_saved_activation_bytes,
         largest_layer_parameter_bytes=largest_layer_parameter_bytes,
-        estimated_streamed_vram_peak_bytes=estimated_streamed_vram_peak_bytes,
+        estimated_streamed_accelerator_peak_bytes=estimated_streamed_accelerator_peak_bytes,
         estimated_streamed_ram_peak_bytes=estimated_streamed_ram_peak_bytes,
-        vram_budget_bytes=vram_budget_bytes,
+        accelerator_memory_budget_bytes=accelerator_memory_budget_bytes,
         process_ram_budget_bytes=process_ram_budget_bytes,
+        system_memory_budget_bytes=system_memory_budget_bytes,
         nvme_budget_bytes=nvme_budget_bytes,
-        resident_fits_vram_budget=(
-            resident_persistent_bytes + estimated_saved_activation_bytes <= vram_budget_bytes
+        resident_fits_accelerator_budget=(
+            resident_persistent_bytes + estimated_saved_activation_bytes
+            <= accelerator_memory_budget_bytes
         ),
-        streamed_working_set_fits_vram_budget=(
-            estimated_streamed_vram_peak_bytes <= vram_budget_bytes
+        streamed_working_set_fits_accelerator_budget=(
+            estimated_streamed_accelerator_peak_bytes <= accelerator_memory_budget_bytes
         ),
         streamed_working_set_fits_ram_budget=(
             estimated_streamed_ram_peak_bytes <= process_ram_budget_bytes

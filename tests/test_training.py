@@ -1,10 +1,30 @@
 from copy import deepcopy
 
+import pytest
 import torch
 
+import microcolossus.training as training_module
 from microcolossus.config import ModelConfig
 from microcolossus.model import DecoderOnlyTransformer
-from microcolossus.training import make_synthetic_lm_batch, run_resident_step, seed_everything
+from microcolossus.training import (
+    make_synthetic_lm_batch,
+    resolve_device,
+    run_resident_step,
+    seed_everything,
+)
+
+
+def test_auto_prefers_mps(monkeypatch) -> None:
+    monkeypatch.setattr(training_module, "mps_is_available", lambda: True)
+    monkeypatch.setattr(training_module, "cuda_is_available", lambda: True)
+    assert resolve_device("auto").type == "mps"
+
+
+def test_explicit_mps_reports_unavailable_build(monkeypatch) -> None:
+    monkeypatch.setattr(training_module, "mps_is_available", lambda: False)
+    monkeypatch.setattr(training_module, "mps_is_built", lambda: False)
+    with pytest.raises(RuntimeError, match="no MPS support"):
+        resolve_device("mps")
 
 
 def test_resident_step_is_reproducible_on_cpu() -> None:
@@ -49,7 +69,9 @@ def test_resident_step_is_reproducible_on_cpu() -> None:
     )
 
     assert first_metrics.loss == second_metrics.loss
+    assert first_metrics.gradient_norm == second_metrics.gradient_norm
     assert first_metrics.parameter_checksum == second_metrics.parameter_checksum
+    assert first_metrics.accelerator_memory_measurement == "none"
     parameter_pairs = zip(first.parameters(), second.parameters(), strict=True)
     for first_parameter, second_parameter in parameter_pairs:
         torch.testing.assert_close(first_parameter, second_parameter, rtol=0, atol=0)

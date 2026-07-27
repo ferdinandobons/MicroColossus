@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "microcolossus"
-version = "0.1.0"
-description = "Experimental strict-budget training runtime for models larger than local RAM and VRAM."
+version = "0.2.0"
+description = "Experimental strict-budget training runtime focused on Apple Silicon MPS."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -23,6 +23,8 @@ dev = [
   "mypy>=1.11",
   "pytest>=8.0",
   "ruff>=0.6",
+  "types-psutil",
+  "types-PyYAML",
 ]
 
 [project.scripts]

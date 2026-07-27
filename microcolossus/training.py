@@ -16,10 +16,11 @@ from .model import DecoderOnlyTransformer
 from .planner import build_static_plan
 from .telemetry import (
     JsonlWriter,
+    accelerator_memory_metrics,
     model_checksum,
-    peak_vram_bytes,
     process_rss_bytes,
-    reset_peak_vram,
+    reset_accelerator_memory,
+    synchronize_accelerator,
     write_json_atomic,
 )
 
@@ -33,8 +34,31 @@ class StepMetrics:
     gradient_norm: float
     duration_seconds: float
     process_rss_bytes: int
-    peak_vram_bytes: int
+    accelerator_memory_measurement: str
+    accelerator_allocated_bytes: int
+    accelerator_driver_allocated_bytes: int
+    accelerator_recommended_max_bytes: int
     parameter_checksum: str
+
+
+def mps_is_available() -> bool:
+    """Return whether the current PyTorch runtime can execute on MPS."""
+
+    backend = getattr(torch.backends, "mps", None)
+    return bool(backend is not None and backend.is_available())
+
+
+def mps_is_built() -> bool:
+    """Return whether the installed PyTorch binary was built with MPS support."""
+
+    backend = getattr(torch.backends, "mps", None)
+    return bool(backend is not None and backend.is_built())
+
+
+def cuda_is_available() -> bool:
+    """Return whether CUDA is available."""
+
+    return bool(torch.cuda.is_available())
 
 
 def seed_everything(seed: int) -> None:
@@ -42,16 +66,32 @@ def seed_everything(seed: int) -> None:
 
     random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
+    if cuda_is_available():
         torch.cuda.manual_seed_all(seed)
+    if mps_is_available():
+        manual_seed = getattr(torch.mps, "manual_seed", None)
+        if callable(manual_seed):
+            manual_seed(seed)
 
 
 def resolve_device(name: str) -> torch.device:
-    """Resolve an explicit or automatic execution device."""
+    """Resolve an explicit or automatic execution device.
+
+    MPS is preferred by ``auto`` because Apple Silicon is the current primary
+    development target. CUDA remains supported as a secondary backend.
+    """
 
     if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if name == "cuda" and not torch.cuda.is_available():
+        if mps_is_available():
+            return torch.device("mps")
+        if cuda_is_available():
+            return torch.device("cuda")
+        return torch.device("cpu")
+    if name == "mps" and not mps_is_available():
+        if not mps_is_built():
+            raise RuntimeError("MPS was requested but this PyTorch build has no MPS support")
+        raise RuntimeError("MPS was requested but is not available on this machine")
+    if name == "cuda" and not cuda_is_available():
         raise RuntimeError("CUDA was requested but is not available")
     return torch.device(name)
 
@@ -99,7 +139,7 @@ def run_resident_step(
     input_ids = input_ids.to(device)
     targets = targets.to(device)
     optimizer.zero_grad(set_to_none=True)
-    reset_peak_vram(device)
+    reset_accelerator_memory(device)
 
     started = time.perf_counter()
     output = model(input_ids, targets)
@@ -110,9 +150,9 @@ def run_resident_step(
     if gradient_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
     optimizer.step()
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    synchronize_accelerator(device)
     duration_seconds = time.perf_counter() - started
+    memory = accelerator_memory_metrics(device)
 
     return StepMetrics(
         step=step,
@@ -120,7 +160,10 @@ def run_resident_step(
         gradient_norm=gradient_norm,
         duration_seconds=duration_seconds,
         process_rss_bytes=process_rss_bytes(),
-        peak_vram_bytes=peak_vram_bytes(device),
+        accelerator_memory_measurement=memory.measurement_kind,
+        accelerator_allocated_bytes=memory.allocated_bytes,
+        accelerator_driver_allocated_bytes=memory.driver_allocated_bytes,
+        accelerator_recommended_max_bytes=memory.recommended_max_bytes,
         parameter_checksum=model_checksum(model),
     )
 
@@ -156,7 +199,8 @@ def run_resident_experiment(
     steps_path.unlink(missing_ok=True)
     telemetry_writer = JsonlWriter(steps_path)
     write_json_atomic(output_dir / "resolved-config.json", config.to_dict())
-    write_json_atomic(output_dir / "memory-plan.json", build_static_plan(model, config).to_dict())
+    plan = build_static_plan(model, config)
+    write_json_atomic(output_dir / "memory-plan.json", plan.to_dict())
 
     metrics: list[StepMetrics] = []
     for step in range(training.steps):
@@ -185,6 +229,7 @@ def run_resident_experiment(
         "final_loss": metrics[-1].loss if metrics else None,
         "parameter_count": model.parameter_count,
         "final_parameter_checksum": metrics[-1].parameter_checksum if metrics else None,
+        "memory_architecture": plan.memory_architecture,
     }
     write_json_atomic(output_dir / "summary.json", summary)
     return metrics

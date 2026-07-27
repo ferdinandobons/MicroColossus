@@ -1,4 +1,4 @@
-"""Command-line interface for the initial MicroColossus prototype."""
+"""Command-line interface for the MicroColossus prototype."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 from collections.abc import Sequence
 
 from .config import load_experiment_config
+from .environment import collect_environment
 from .model import DecoderOnlyTransformer
 from .planner import build_static_plan
 from .training import format_step_metrics, run_resident_experiment, seed_everything
@@ -15,9 +16,11 @@ from .training import format_step_metrics, run_resident_experiment, seed_everyth
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="microcolossus",
-        description="MicroColossus resident baseline and static planner.",
+        description="MicroColossus resident baseline, MPS diagnostics, and static planner.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
+
+    subcommands.add_parser("doctor", help="report CPU, CUDA, and Apple MPS availability")
 
     plan = subcommands.add_parser("plan", help="estimate memory requirements")
     plan.add_argument("--config", required=True, help="path to an experiment YAML file")
@@ -27,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--steps", type=int, default=None, help="override configured steps")
     train.add_argument(
         "--device",
-        choices=("auto", "cpu", "cuda"),
+        choices=("auto", "cpu", "cuda", "mps"),
         default=None,
         help="override configured execution device",
     )
@@ -36,8 +39,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    config = load_experiment_config(args.config)
 
+    if args.command == "doctor":
+        print(json.dumps(collect_environment().to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    config = load_experiment_config(args.config)
     if args.command == "plan":
         seed_everything(config.training.seed)
         model = DecoderOnlyTransformer(config.model)
