@@ -1,6 +1,6 @@
 # MicroColossus Validation Ledger
 
-This ledger records executable evidence, engineering decisions, and the exact boundary of each result.
+This ledger records executable evidence, engineering decisions, and the exact boundary of each accepted result.
 
 ## Validation policy
 
@@ -13,34 +13,14 @@ Mandatory distinctions:
 - a CPU result is not evidence for MPS or MLX;
 - a functional pass with local source changes is not a clean protocol pass;
 - checksum equality is stronger than numerical agreement;
-- framework memory counters are not assumed to represent equivalent physical memory;
+- framework memory counters are not equivalent physical-memory counters;
 - application storage bytes are not NAND-level writes;
 - full-parameter, compact, and adapter methods are reported separately;
 - a larger parameter count is not success when correctness, recovery, throughput, or endurance are unacceptable.
 
-## M0 diagnostic and corrections
+## Resident Apple M2 foundation
 
-The first executable diagnostic tested commit:
-
-```text
-37fb45b189d13bab2b6f4084af0c21993f65ceff
-```
-
-Result: **FAIL**.
-
-Findings:
-
-1. Ruff import formatting failed.
-2. Checksum telemetry required NumPy unexpectedly.
-3. Resident training stopped during checksum calculation.
-4. Reproducibility and fixed-batch diagnostics could not complete.
-5. mypy reported third-party and local typing problems.
-
-The following implementation removed the NumPy checksum dependency, added MPS support, synchronized MPS timing, added MPS memory telemetry, introduced `microcolossus doctor`, and made the planner aware of unified-memory accounting.
-
-## Resident Apple M2 validation
-
-The first real M2 diagnostic found a Ruff issue and an MPS-incompatible float64 gradient-norm path. After correction, a clean rerun tested:
+The first executable diagnostic exposed Ruff formatting, an unintended NumPy checksum dependency, and an MPS-incompatible float64 gradient-norm path. After correction, a clean MacBook Air M2 rerun tested commit:
 
 ```text
 a56fc514f2f8e705654034f3c2f02e3a441c61f3
@@ -48,26 +28,7 @@ a56fc514f2f8e705654034f3c2f02e3a441c61f3
 
 Result: **PASS**.
 
-Environment:
-
-- MacBook Air;
-- Apple M2;
-- 8 GB unified memory;
-- native arm64;
-- no Rosetta translation;
-- PyTorch 2.13.0;
-- MPS built and available;
-- deliberate MPS-to-CPU fallback disabled.
-
-Passed:
-
-- Ruff, mypy, pytest, and compileall;
-- MPS preflight;
-- explicit MPS training;
-- automatic MPS selection;
-- larger resident smoke run;
-- CPU-versus-MPS comparison;
-- fixed-batch MPS overfit.
+The run validated native arm64 execution, MPS availability, resident full-parameter training, automatic MPS selection, CPU-versus-MPS comparison, fixed-batch learning, package checks, and a clean source tree.
 
 Observed fixed-batch learning:
 
@@ -75,9 +36,7 @@ Observed fixed-batch learning:
 5.566842079162598 -> 0.4145740866661072
 ```
 
-No fallback, unsupported operator, non-finite value, or MPS out-of-memory failure was detected in the tested path.
-
-MPS was not always bitwise reproducible by final checksum. Numerical and bitwise reproducibility remain separate measurements.
+No fallback, unsupported operator, non-finite value, or MPS out-of-memory failure was detected in the tested path. MPS bitwise and numerical reproducibility remain separate properties.
 
 ## Competitive PyTorch MPS and MLX validation
 
@@ -91,47 +50,29 @@ Runtime result: **PASS**.
 
 It completed PyTorch MPS, checkpointed PyTorch MPS, and MLX on the tiny workload and in three counterbalanced rounds on a 23,213,056-parameter resident workload.
 
-Median throughput:
-
-| Variant | Tokens/s | Relative to PyTorch |
+| Variant | Median tokens/s | Relative to PyTorch |
 |---|---:|---:|
 | PyTorch MPS | 1,379.23 | 1.000x |
 | PyTorch MPS checkpointed | 1,337.37 | 0.970x |
 | MLX | 2,195.69 | 1.592x |
 
-Numerical result:
-
-- PyTorch versus checkpointed PyTorch was exact in the competitive runs;
-- PyTorch versus MLX maximum loss difference was `1.9073486328125e-06`;
-- maximum final-parameter absolute difference was `3.8036610931158066e-05`;
-- mean final-parameter absolute difference was `7.378751249633382e-09`;
-- all values were finite and stable across three rounds.
+PyTorch-versus-MLX maximum loss difference was `1.9073486328125e-06`. Maximum final-parameter absolute difference was `3.8036610931158066e-05`. Mean final-parameter absolute difference was `7.378751249633382e-09`.
 
 Backend decision: **DUAL BACKEND**.
 
 - MLX is the preferred optimized Apple Silicon execution candidate.
-- PyTorch MPS remains the numerical oracle and the recovery or debugging reference.
-- Storage and transaction formats remain backend-neutral.
+- PyTorch MPS remains the numerical oracle and recovery or debugging reference.
+- Storage, transaction, and execution-plan formats remain backend-neutral.
 
-Version 0.3.3 then corrected three typing findings. A clean verification of commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c` passed Ruff, mypy, 28 tests, compileall, doctor, and all three tiny backend smoke paths.
+A later clean verification of version 0.3.3 passed Ruff, mypy, 28 tests, compileall, doctor, and all three tiny backend smoke paths.
 
-## Versioned tensor store and CPU storage lifecycle
+## Versioned tensor store and observable optimizer lifecycle
 
-MicroColossus 0.4 introduced:
+MicroColossus 0.4 introduced canonical tensor, chunk, manifest, journal, and telemetry schemas, content-addressed chunks, copy-on-write versions, atomic publication, budgets, corruption detection, recovery, failure injection, and framework adapters.
 
-- canonical tensor, chunk, manifest, journal, and telemetry schemas;
-- content-addressed immutable chunks;
-- copy-on-write tensor versions;
-- atomic `CURRENT` publication;
-- storage and staging budgets;
-- corruption detection;
-- conservative recovery;
-- failure injection;
-- PyTorch and MLX adapters.
+MicroColossus 0.5 added one fully observed storage-backed micro optimizer lifecycle. CPU CI required exact resident-versus-storage state, exact committed-versus-restored state, deterministic repeats, failure recovery, and clean checks on Python 3.11 and 3.13.
 
-MicroColossus 0.5 added one fully observed storage-backed micro optimizer lifecycle. CPU CI required exact resident-versus-storage state, exact committed-versus-restored state, deterministic repeats, failure recovery, and clean Ruff, mypy, pytest, and compileall on Python 3.11 and 3.13.
-
-## Clean 0.5 target storage validation
+### Clean 0.5 target validation
 
 Tested commit:
 
@@ -146,9 +87,8 @@ Environment:
 - MacBook Air `Mac14,2`;
 - Apple M2;
 - 8 GB unified memory;
-- native arm64;
-- `sysctl.proc_translated=0`;
-- PyTorch 2.13.0 with MPS built and available;
+- native arm64 without Rosetta;
+- PyTorch 2.13.0 with MPS;
 - MLX 0.32.0;
 - fallback disabled.
 
@@ -156,81 +96,123 @@ Project quality:
 
 - Ruff passed;
 - mypy passed with no issues in 23 source files;
-- pytest passed, 52 tests in 13.63 seconds;
+- pytest passed, 52 tests;
 - compileall passed;
-- final `git status --short` was empty;
-- `git diff --check` was clean.
+- final repository state was clean.
 
-MPS storage lifecycle:
+MPS lifecycle:
 
-- micro run 1: GREEN;
-- micro run 2: GREEN;
-- repeated micro runs: bitwise exact;
-- 443,648-parameter tiny run: GREEN;
-- maximum resident-versus-storage loss difference: `0.0`;
-- maximum gradient-norm difference: `0.0`;
-- maximum final-state absolute difference: `0.0`;
-- storage-versus-restored state: exact.
+- two GREEN micro runs;
+- bitwise-exact micro repeatability;
+- one GREEN 443,648-parameter tiny run;
+- zero resident-versus-storage loss difference;
+- zero gradient-norm difference;
+- zero final-state absolute difference;
+- exact storage-versus-restored state.
 
-Durability:
+All five injected interruption points preserved the prior committed manifest. MLX micro and tiny round trips passed exactly. Cross-backend canonical model state was GREEN.
 
-- before chunk write: passed;
-- during chunk write: passed;
-- before chunk fsync: passed;
-- before manifest rename: passed;
-- before `CURRENT` rename: passed.
+Reported application-level totals:
 
-Every injected interruption preserved the prior committed manifest.
-
-MLX and cross-backend validation:
-
-- MLX micro round trip: passed;
-- MLX tiny round trip: passed;
-- PyTorch-versus-MLX canonical micro state: GREEN;
-- PyTorch-versus-MLX canonical tiny state: GREEN;
-- canonical model-state bytes were exact after loading the same portable state.
-
-Application-level storage totals reported by the diagnostic:
-
-- logical bytes read: `7,468,738`;
+- bytes read: `7,468,738`;
 - referenced chunk reads: `226`;
-- logical or managed bytes written: `7,641,680`;
+- bytes written: `7,641,680`;
 - chunk writes: `166`;
 - reused chunks: `60`;
 - reuse ratio: `26.55%`;
 - fsync time: `0.010095799` seconds;
-- manifest publication time: `0.001221206` seconds.
+- publication time: `0.001221206` seconds.
 
-Resource observations:
+Maximum RSS was `432,472,064` bytes. Maximum MPS allocation was `8,709,376` bytes. Maximum Metal driver allocation was `28,049,408` bytes. Swap delta was zero.
 
-- maximum RSS: `432,472,064` bytes;
-- maximum MPS allocation: `8,709,376` bytes;
-- maximum Metal driver allocation: `28,049,408` bytes;
-- maximum MLX active memory: `9,004,600` bytes;
-- maximum MLX peak memory: `12,335,968` bytes;
-- maximum MLX cache memory: `3,331,548` bytes;
-- swap delta: `0`.
+This result completed the versioned tensor-store and observable optimizer-lifecycle milestones. It did not validate bounded execution.
 
-No hidden fallback, unsupported operation, non-finite value, MPS allocation failure, or unexpected command failure was detected.
+## Bounded parameter-group forward
 
-This result completes the versioned tensor-store and observable micro-step milestones. It does not validate layer-wise bounded execution or true out-of-core training.
-
-## Version 0.6 bounded forward implementation
-
-Version 0.6 introduces a PyTorch reference executor that:
+MicroColossus 0.6 introduced a PyTorch reference executor that:
 
 1. creates a parameter-only canonical store;
 2. releases the bootstrap model;
 3. executes and releases token and position embeddings;
 4. executes and releases one Transformer block at a time;
 5. reloads tied token embeddings for the output projection;
-6. rejects an execution group that exceeds the declared logical parameter budget;
+6. rejects an execution group that exceeds the parameter budget;
 7. compares each boundary, final logits, and loss with the resident oracle;
-8. verifies that the committed store manifest remains unchanged.
+8. verifies that the committed parameter manifest remains unchanged.
 
-The implementation reports group reads, referenced chunks, logical parameter bytes, materialization, compute, release, activation bytes, RSS, accelerator allocation, driver allocation, checksums, and numerical distance.
+### Clean 0.6 target validation
 
-The initial bounded executor retains hidden activations and implements forward propagation only. Target M2 validation is required before this milestone is completed.
+Tested commit:
+
+```text
+1feea9f9eef28e551ad4ae4944614083effa804f
+```
+
+Overall result: **PASS**.
+
+Environment:
+
+- MacBook Air `Mac14,2`;
+- Apple M2;
+- 8 GB unified memory;
+- native arm64 without Rosetta;
+- fallback disabled.
+
+Project quality:
+
+- Ruff passed;
+- mypy passed with no issues in 24 source files;
+- pytest passed, 56 tests in 14.70 seconds;
+- compileall passed;
+- final repository state was clean.
+
+Bounded-forward results:
+
+- micro run 1: GREEN;
+- micro run 2: GREEN;
+- micro repeatability: BITWISE_EXACT;
+- 443,648-parameter tiny run: GREEN;
+- intentional budget rejection: passed;
+- micro group order: `embedding`, `block-0`, `final-head`;
+- tiny group order: `embedding`, `block-0`, `block-1`, `final-head`;
+- micro reads: 13 total, 12 unique, 1 repeated;
+- tiny reads: 21 total, 20 unique, 1 repeated;
+- tied token embedding was reloaded exactly once;
+- largest micro group: `33,280` bytes;
+- largest tiny group: `788,480` bytes;
+- configured budget: `1,048,576` bytes;
+- maximum boundary difference: `0.0`;
+- maximum logits difference: `0.0`;
+- loss difference: `0.0`;
+- parameter manifest unchanged in every run;
+- store verification and recovery passed.
+
+Maximum RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes. Swap delta was zero.
+
+No fallback, unsupported operation, non-finite value, allocation failure, or unexpected command failure was detected.
+
+This result completed the bounded parameter-group forward milestone. Hidden activations remained resident between groups.
+
+## Bounded backward and versioned gradients
+
+MicroColossus 0.7 implements the next isolated phase:
+
+1. execute the bounded forward path and retain detached boundary activations on CPU;
+2. process groups in reverse order;
+3. reload one parameter group at a time;
+4. recompute one local forward with autograd enabled;
+5. propagate one upstream activation gradient at a time;
+6. commit parameter gradients into a separate versioned gradient store;
+7. combine the output-head and embedding contributions for tied token embeddings;
+8. stream final gradients to calculate the global norm;
+9. compare every final gradient tensor with the resident PyTorch oracle;
+10. keep the parameter manifest immutable.
+
+The tied token-embedding gradient is first published at version 0 and then updated to version 1 when the embedding contribution is added.
+
+CPU validation requires exact gradients and exact global norm. MPS target validation must report raw loss, norm, and tensor differences, plus group budgets, storage traffic, memory counters, store recovery, and repeatability.
+
+This phase intentionally does not update parameters or AdamW state. A later streamed optimizer phase will consume the validated gradient store.
 
 ## Milestone status
 
@@ -241,8 +223,9 @@ The initial bounded executor retains hidden activations and implements forward p
 | M2. Competitive Apple Silicon baseline | Completed |
 | M3. Versioned tensor store | Completed |
 | M4A. Observable storage-backed optimizer lifecycle | Completed |
-| M4B1. Bounded parameter-group forward | Implemented, target validation pending |
-| M4B2. Bounded backward and streamed optimizer update | Not started |
+| M4B1. Bounded parameter-group forward | Completed |
+| M4B2. Bounded backward and gradient store | Implemented, target validation pending |
+| M4B3. Streamed AdamW and atomic step publication | Not started |
 | Activation recomputation and strict runtime budgets | Not started |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
@@ -253,14 +236,14 @@ The initial bounded executor retains hidden activations and implements forward p
 
 The accepted evidence does not establish:
 
-- bounded backward propagation;
-- stored or streamed gradients;
 - bounded AdamW execution;
-- activation recomputation or offload;
+- atomic publication of a complete bounded optimizer step;
+- activation recomputation from storage or activation offload;
 - asynchronous storage overlap;
 - intra-layer tiling;
+- bounded MLX backward;
 - real-corpus language-model training;
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target machine.
 
-The next accepted hardware gate is the micro and tiny MPS validation of the bounded forward executor. After that, development moves to reverse-order bounded backward and a second streamed pass for global clipping and AdamW publication.
+The next hardware gate is the micro and tiny MPS validation of bounded backward and the gradient store. After that, development moves to a second streamed pass for global clipping, AdamW state, parameter updates, and atomic publication.
