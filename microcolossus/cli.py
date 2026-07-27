@@ -20,8 +20,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="microcolossus",
         description=(
-            "MicroColossus storage, resident baselines, competitive benchmarks, "
-            "MPS diagnostics, and static planning."
+            "MicroColossus storage, bounded execution, resident baselines, "
+            "competitive benchmarks, MPS diagnostics, and static planning."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -97,6 +97,30 @@ def _parser() -> argparse.ArgumentParser:
         choices=("auto", "cpu", "cuda", "mps"),
         default=None,
         help="override configured execution device",
+    )
+
+    bounded_forward = subcommands.add_parser(
+        "bounded-forward",
+        help="compare resident forward with parameter groups loaded from storage",
+    )
+    bounded_forward.add_argument(
+        "--config", required=True, help="path to an experiment YAML file"
+    )
+    bounded_forward.add_argument(
+        "--store", required=True, help="new parameter tensor store directory"
+    )
+    bounded_forward.add_argument("--output", required=True, help="result JSON path")
+    bounded_forward.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default=None,
+        help="override configured execution device",
+    )
+    bounded_forward.add_argument(
+        "--parameter-working-set-mib",
+        type=float,
+        default=1.0,
+        help="maximum logical parameter bytes materialized for one execution group",
     )
     return parser
 
@@ -179,6 +203,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             store_path=args.store,
             output_path=args.output,
             device_override=args.device,
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "bounded-forward":
+        from .bounded_forward import run_bounded_forward
+
+        mib = 1024**2
+        result = run_bounded_forward(
+            config,
+            store_path=args.store,
+            output_path=args.output,
+            device_override=args.device,
+            parameter_working_set_bytes=int(args.parameter_working_set_mib * mib),
         )
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return 0
