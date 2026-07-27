@@ -62,6 +62,7 @@ jobs:
         run: |
           microcolossus doctor
           microcolossus bounded-step --help
+          microcolossus-bounded-train --help
           microcolossus plan --config examples/tiny-mps.yaml
           microcolossus train --config examples/tiny-resident.yaml --steps 1 --device cpu
           microcolossus benchmark \
@@ -113,3 +114,15 @@ jobs:
             --parameter-working-set-mib 1 \
             --gradient-working-set-mib 1 \
             --optimizer-working-set-mib 4
+          microcolossus-bounded-train \
+            --config examples/micro-storage.yaml \
+            --bundle-store /tmp/microcolossus-bounded-training-bundle \
+            --target-step 2 \
+            --output /tmp/microcolossus-bounded-training-step-2.json \
+            --device cpu
+          microcolossus-bounded-train \
+            --config examples/micro-storage.yaml \
+            --bundle-store /tmp/microcolossus-bounded-training-bundle \
+            --target-step 3 \
+            --output /tmp/microcolossus-bounded-training-step-3.json \
+            --device cpu
