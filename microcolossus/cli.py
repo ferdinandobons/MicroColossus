@@ -164,6 +164,42 @@ def _parser() -> argparse.ArgumentParser:
         default=1.0,
         help="maximum logical gradient bytes materialized for one group",
     )
+
+    bounded_step = subcommands.add_parser(
+        "bounded-step",
+        help="execute one group-bounded AdamW step and publish it atomically",
+    )
+    bounded_step.add_argument(
+        "--config", required=True, help="path to an experiment YAML file"
+    )
+    bounded_step.add_argument(
+        "--bundle-store", required=True, help="new atomic step-bundle directory"
+    )
+    bounded_step.add_argument("--output", required=True, help="result JSON path")
+    bounded_step.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default=None,
+        help="override configured execution device",
+    )
+    bounded_step.add_argument(
+        "--parameter-working-set-mib",
+        type=float,
+        default=1.0,
+        help="maximum logical parameter bytes materialized for one group",
+    )
+    bounded_step.add_argument(
+        "--gradient-working-set-mib",
+        type=float,
+        default=1.0,
+        help="maximum logical gradient bytes materialized for one group",
+    )
+    bounded_step.add_argument(
+        "--optimizer-working-set-mib",
+        type=float,
+        default=4.0,
+        help="maximum logical parameter, gradient, and Adam bytes for one group",
+    )
     return parser
 
 
@@ -276,6 +312,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             device_override=args.device,
             parameter_working_set_bytes=int(args.parameter_working_set_mib * mib),
             gradient_working_set_bytes=int(args.gradient_working_set_mib * mib),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "bounded-step":
+        from .bounded_optimizer import run_bounded_optimizer_step
+
+        mib = 1024**2
+        result = run_bounded_optimizer_step(
+            config,
+            bundle_store_path=args.bundle_store,
+            output_path=args.output,
+            device_override=args.device,
+            parameter_working_set_bytes=int(args.parameter_working_set_mib * mib),
+            gradient_working_set_bytes=int(args.gradient_working_set_mib * mib),
+            optimizer_working_set_bytes=int(args.optimizer_working_set_mib * mib),
         )
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return 0
