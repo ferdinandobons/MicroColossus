@@ -14,6 +14,8 @@ def test_bounded_backward_command_emits_json(tmp_path: Path, capsys) -> None:
             "examples/micro-storage.yaml",
             "--parameter-store",
             str(tmp_path / "parameters"),
+            "--oracle-gradient-store",
+            str(tmp_path / "oracle-gradients"),
             "--gradient-store",
             str(tmp_path / "gradients"),
             "--output",
@@ -31,4 +33,5 @@ def test_bounded_backward_command_emits_json(tmp_path: Path, capsys) -> None:
     assert result == 0
     assert output["schema_version"] == "microcolossus.bounded-backward.v1"
     assert output["resident_vs_bounded_gradients"]["exact_bytes"]
+    assert output["resident_oracle_released_before_bounded"]
     assert output["parameter_manifest_unchanged"]
