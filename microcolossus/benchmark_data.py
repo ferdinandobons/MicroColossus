@@ -7,7 +7,9 @@ import math
 import os
 import statistics
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import psutil
@@ -240,8 +242,12 @@ def save_array_mapping_atomic(
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
+    # NumPy intentionally accepts dynamic archive member names through **kwargs.
+    # Casting the callable avoids a false positive for the reserved allow_pickle
+    # keyword while preserving the public np.savez runtime behavior.
+    savez = cast(Callable[..., None], np.savez)
     with temporary.open("wb") as handle:
-        np.savez(handle, **values)
+        savez(handle, **values)
     os.replace(temporary, destination)
 
 

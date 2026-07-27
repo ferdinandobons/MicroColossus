@@ -178,9 +178,12 @@ def _export_state(
     model: MLXDecoderOnlyTransformer,
 ) -> dict[str, np.ndarray]:
     mx.eval(model.parameters())
+    flattened = tree_flatten(model.parameters())
+    if not isinstance(flattened, list):
+        raise TypeError("MLX tree_flatten returned a mapping instead of a list")
     return {
         name: np.ascontiguousarray(np.array(value, copy=True))
-        for name, value in tree_flatten(model.parameters())
+        for name, value in flattened
     }
 
 
@@ -210,7 +213,7 @@ def run_mlx_benchmark(
     model.train()
     optimizer = optim.AdamW(
         learning_rate=config.training.learning_rate,
-        betas=(0.9, 0.999),
+        betas=[0.9, 0.999],
         eps=1e-8,
         weight_decay=config.training.weight_decay,
         bias_correction=True,
