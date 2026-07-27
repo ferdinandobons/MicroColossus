@@ -152,6 +152,20 @@ The MLX adapter exports and restores flattened model and optimizer trees through
 
 The store itself remains independent of both frameworks.
 
+## Development scale ladder
+
+Routine development must not require a long 18M or 23M parameter run. MicroColossus uses multiple validation scales:
+
+1. **Unit scale**. Byte payloads, small arrays, isolated operators, transaction states, corruption, and failure injection.
+2. **Micro model**. A sub-million-parameter Transformer for every end-to-end storage-backed path. It must expose detailed loss, gradient, tensor-version, memory, I/O, and timing telemetry.
+3. **Small real-training model**. A few-million-parameter model on a small real text corpus. It will validate training and validation loss, checkpoint and resume, and sample generation.
+4. **Milestone scale**. Larger resident or storage-backed models run only after the same path passes at smaller scales.
+5. **Capacity demonstration**. The 124M, 350M, and larger targets remain later research gates.
+
+Small models accelerate iteration. They do not replace real training, resident-versus-storage numerical comparison, or larger-than-resident capacity demonstrations.
+
+A future external training project may become a real-training frontend. The tensor store, planner, transaction protocol, telemetry, and backend interfaces must remain independent of that frontend.
+
 ## CLI
 
 Create an empty store:
@@ -178,7 +192,7 @@ microcolossus store-recover --path runs/store
 
 ## Current validation
 
-The isolated development validation completed:
+The isolated storage validation completed:
 
 - 18 storage tests passed;
 - one optional MLX test was skipped where MLX was unavailable;
@@ -187,11 +201,19 @@ The isolated development validation completed:
 - copy-on-write versions reused unchanged chunks;
 - scalar, zero-length, non-contiguous, and big-endian inputs were covered;
 - every injected interruption preserved the previous manifest;
-- CLI initialization, verification, and recovery completed;
-- bytecode compilation completed;
-- no new Python line exceeded the configured 100-character limit.
+- CLI initialization, verification, and recovery completed.
 
-Ruff, mypy, the complete repository suite, and the MLX adapter still require clean verification after integration.
+The integrated GitHub Actions matrix passed on Python 3.11 and 3.13:
+
+- installation;
+- Ruff;
+- mypy;
+- the complete pytest suite;
+- bytecode compilation;
+- resident CPU training and benchmark smoke tests;
+- tensor-store initialization, verification, and recovery smoke tests.
+
+The MLX adapter still requires a clean target-M2 round-trip validation before this milestone is closed.
 
 ## Explicitly not validated
 
