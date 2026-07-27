@@ -55,7 +55,7 @@ Environment:
 
 Runtime result: **PASS**.
 
-Repository-quality result: **PARTIAL PASS**, because mypy reported three static typing errors while all runtime variants completed.
+Repository-quality result at that commit: **PARTIAL PASS**, because mypy reported three static typing errors while all runtime variants completed.
 
 Passed runtime and integrity checks:
 
@@ -130,9 +130,9 @@ PyTorch versus MLX:
 - maximum final-parameter absolute difference: `3.8036610931158066e-05`;
 - mean final-parameter absolute difference: `7.378751249633382e-09`;
 - all values finite;
-- identical values across all three competitive rounds.
+- identical aggregate values across all three competitive rounds.
 
-The maximum relative difference was large for a parameter near zero. It is not interpreted without the corresponding absolute and mean differences.
+The maximum relative difference was large for a parameter near zero. It is interpreted together with the corresponding absolute and mean differences.
 
 ### Memory and swap
 
@@ -187,8 +187,8 @@ Rationale:
 - MLX was approximately `1.592x` faster in median steady-state throughput.
 - MLX also had lower median first-step latency in the competitive runs.
 - PyTorch remains the portable numerical oracle.
-- PyTorch currently provides the clearest reference for debugging, exact state comparison, validation policy, and future recovery semantics.
-- The storage-backed path has not been benchmarked. It may have different bottlenecks from resident execution.
+- PyTorch provides the clearest current reference for debugging, exact state comparison, validation policy, and recovery semantics.
+- The storage-backed path has not been benchmarked and may have different bottlenecks from resident execution.
 
 Current responsibility split:
 
@@ -198,37 +198,84 @@ Current responsibility split:
 
 This is not a permanent promise that every operation will use MLX. Each future optimization remains subject to measurement.
 
-## Static typing findings
+## Static typing findings and release 0.3.3
 
-The runtime suite identified three mypy findings:
+The version 0.3.2 runtime suite identified three mypy findings:
 
 1. NumPy's dynamic `np.savez` keyword archive interface conflicted with the typed `allow_pickle` keyword.
 2. MLX `tree_flatten` returns a list-or-dictionary union, so iteration required explicit narrowing.
 3. MLX AdamW stubs require `betas` as a list rather than a tuple.
 
-Version `0.3.3` applies runtime-preserving corrections:
+Version `0.3.3`, commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c`, applied runtime-preserving corrections:
 
-- locally casts the public `np.savez` callable to its dynamic callable contract;
-- verifies that `tree_flatten` returned a list before tuple unpacking;
-- passes AdamW betas as `[0.9, 0.999]`.
+- locally cast the public `np.savez` callable to its dynamic callable contract;
+- verify that `tree_flatten` returned a list before tuple unpacking;
+- pass AdamW betas as `[0.9, 0.999]`.
 
-A clean mypy and tiny-runtime verification on the target M2 is required before the typing gate is marked complete. Repeating the nine performance runs is not required unless the smoke comparison changes, because the fixes do not alter the numerical algorithm or benchmark schedule.
+## Final 0.3.3 verification
 
-## Next engineering gate
+A fresh Mac M2 clone of commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c` completed the final release-quality gate.
 
-1. Verify version `0.3.3` from a clean M2 checkout.
-2. Require Ruff, mypy, pytest, and compileall to pass.
-3. Repeat the tiny PyTorch MPS, checkpointed PyTorch MPS, and MLX smoke tests.
-4. Confirm unchanged initial-state and batch checksums.
-5. Confirm numerical behavior remains within the recorded tiny baseline.
-6. Define a backend-neutral tensor manifest and transaction model.
-7. Implement the versioned NVMe tensor store.
-8. Build synchronous bounded storage-to-MLX execution.
-9. Compare it against storage-to-PyTorch execution and the resident oracle.
+Environment:
 
-## Current boundary
+- MicroColossus `0.3.3`;
+- NumPy `2.4.6`;
+- PyTorch `2.13.0`;
+- MLX `0.32.0`;
+- MPS built and available;
+- MPS fallback disabled.
 
-The competitive result establishes a resident dual-backend direction. It does not establish:
+Project checks:
+
+- Ruff: passed;
+- mypy: passed with no issues in 17 source files;
+- pytest: passed, 28 tests;
+- compileall: passed;
+- doctor: passed and detected Apple M2 MPS.
+
+Tiny smoke results:
+
+| Variant | Tokens/s | Final loss |
+|---|---:|---:|
+| PyTorch MPS | 10,339.74 | 5.601982116699219 |
+| PyTorch MPS checkpointed | 8,083.50 | 5.601982593536377 |
+| MLX | 13,927.55 | 5.601983070373535 |
+
+Artifact and equivalence checks:
+
+- portable-state checksum identical across all variants: `c375bea95d4d37da897cf852d824098775ef1552530cc2936876167ae53cdc40`;
+- batch checksum identical across all variants: `a2eacb6299cacfdc41d19863545606365c2b4c793c0dc0336b19f4cb3b4eacce`;
+- every JSON document parsed;
+- every sibling `.state.npz` artifact existed and matched its recorded checksum;
+- all final parameters were finite;
+- no fallback, unsupported operator, OOM, allocation failure, NaN, or infinity evidence was reported;
+- `git status --short` was empty and `git diff --check` was clean.
+
+Numerical comparison:
+
+- PyTorch versus checkpointed PyTorch maximum loss difference: `4.768e-07`;
+- PyTorch versus checkpointed PyTorch maximum final-state absolute difference: `5.960e-08`;
+- PyTorch versus MLX maximum loss difference: `9.536e-07`;
+- PyTorch versus MLX maximum final-state absolute difference: `3.4948e-05`;
+- PyTorch versus MLX mean final-state absolute difference: `1.20696e-08`.
+
+The tiny results did not materially differ from the prior baseline, so the nine larger performance rounds were not repeated.
+
+## Competitive milestone status
+
+The resident competitive milestone is **complete**.
+
+Established:
+
+- package quality checks pass on the target environment;
+- PyTorch MPS and MLX both execute the controlled full-parameter workload;
+- the benchmark delivers identical initial state and batches;
+- output artifacts are verifiable;
+- numerical differences are measured rather than hidden;
+- MLX is materially faster in the tested resident workload;
+- the dual-backend decision is supported by evidence.
+
+Not established:
 
 - NVMe-backed parameters or optimizer state;
 - storage-to-accelerator streaming;
@@ -239,4 +286,20 @@ The competitive result establishes a resident dual-backend direction. It does no
 - crash recovery;
 - training state larger than safe resident unified memory.
 
-Operational tracking remains in [GitHub issue #1](https://github.com/ferdinandobons/MicroColossus/issues/1).
+## Next engineering gate
+
+The next milestone is the backend-neutral versioned NVMe tensor store:
+
+1. define stable tensor, chunk, version, manifest, and transaction schemas;
+2. implement immutable or copy-on-write chunk storage;
+3. add per-chunk checksums;
+4. add write-ahead journaling;
+5. publish manifests atomically;
+6. recover the last committed state after interruption;
+7. enforce staging and storage budgets;
+8. report read bytes, write bytes, latency, fsync time, and cumulative SSD writes;
+9. validate identical export and restore through PyTorch and MLX adapters.
+
+Synchronous storage-to-accelerator training begins only after the store passes integrity, recovery, and budget tests.
+
+Operational tracking continues in GitHub issues.
