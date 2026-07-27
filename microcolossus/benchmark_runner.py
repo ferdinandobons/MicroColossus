@@ -25,10 +25,10 @@ from .benchmark_data import (
     system_memory_sample,
 )
 from .benchmark_types import (
+    SCHEMA_VERSION,
     BackendMeasurements,
     BenchmarkResult,
     BenchmarkSettings,
-    SCHEMA_VERSION,
 )
 from .config import ExperimentConfig
 from .telemetry import write_json_atomic
