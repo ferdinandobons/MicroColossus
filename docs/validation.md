@@ -212,7 +212,15 @@ The tied token-embedding gradient is first published at version 0 and then updat
 
 CPU validation requires exact gradients and exact global norm. MPS target validation must report raw loss, norm, and tensor differences, plus group budgets, storage traffic, memory counters, store recovery, and repeatability.
 
-This phase intentionally does not update parameters or AdamW state. A later streamed optimizer phase will consume the validated gradient store.
+This phase intentionally does not update parameters or AdamW state.
+
+## Clean 0.7 target bounded-backward validation
+
+Commit `c72dcc2f8d8a7bd783ae263cf14476d0681b664b` passed on a clean MacBook Air M2 with 8 GB unified memory. Ruff, mypy, 62 tests with one skip, compileall, two GREEN micro runs, one GREEN tiny run, repeatability, parameter and gradient budget rejection, three-store verification and recovery, tied-gradient versioning, and clean source-state checks all passed. Maximum loss and tensor-gradient differences were zero. Maximum global-norm difference was approximately `9.57e-08`. No swap growth, fallback, unsupported operation, or non-finite value was detected.
+
+## Version 0.8 bounded optimizer implementation
+
+Version 0.8 consumes the validated gradient store, applies the canonical clipping coefficient, streams unique parameter groups with matching Adam state, writes candidate parameter and optimizer stores, validates the complete result against a resident oracle, and publishes one atomic root step bundle. CPU CI requires exact state and failure recovery before target MPS validation.
 
 ## Milestone status
 
@@ -224,8 +232,8 @@ This phase intentionally does not update parameters or AdamW state. A later stre
 | M3. Versioned tensor store | Completed |
 | M4A. Observable storage-backed optimizer lifecycle | Completed |
 | M4B1. Bounded parameter-group forward | Completed |
-| M4B2. Bounded backward and gradient store | Implemented, target validation pending |
-| M4B3. Streamed AdamW and atomic step publication | Not started |
+| M4B2. Bounded backward and gradient store | Completed, including target M2 validation |
+| M4B3. Streamed AdamW and atomic step publication | Implemented, target validation pending |
 | Activation recomputation and strict runtime budgets | Not started |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
@@ -236,8 +244,8 @@ This phase intentionally does not update parameters or AdamW state. A later stre
 
 The accepted evidence does not establish:
 
-- bounded AdamW execution;
-- atomic publication of a complete bounded optimizer step;
+- multiple consecutive bounded optimizer steps;
+- checkpoint and resume for the bounded runtime;
 - activation recomputation from storage or activation offload;
 - asynchronous storage overlap;
 - intra-layer tiling;
@@ -246,4 +254,4 @@ The accepted evidence does not establish:
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target machine.
 
-The next hardware gate is the micro and tiny MPS validation of bounded backward and the gradient store. After that, development moves to a second streamed pass for global clipping, AdamW state, parameter updates, and atomic publication.
+The next hardware gate is the micro and tiny MPS validation of version 0.8: clipping, group-bounded AdamW, candidate-state equivalence, bundle failure recovery, optimizer working-set rejection, and atomic root publication.

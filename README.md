@@ -10,7 +10,7 @@ The primary target is **Apple Silicon, beginning with an 8 GB Mac M2**.
 - **PyTorch MPS** is the numerical oracle and the reference for validation, debugging, state comparison, and recovery semantics.
 - Tensor storage, transactions, and execution plans remain backend-neutral.
 
-The project does not yet claim full out-of-core training. It has validated resident execution, recoverable storage-backed state, a complete observable micro optimizer lifecycle, and bounded parameter-group forward execution. Version 0.7 adds bounded backward propagation and versioned gradient storage for target-hardware validation.
+The project does not yet claim full out-of-core training. Resident execution, recoverable storage-backed state, bounded forward, and bounded backward are validated on the target M2. Version 0.8 adds one complete group-bounded AdamW update with atomic step-bundle publication for target-hardware validation.
 
 ## Why Apple Silicon changes the design
 
@@ -105,7 +105,23 @@ Version 0.7 adds the next isolated phase:
 - compare all final gradients with the resident PyTorch oracle;
 - keep the parameter manifest immutable.
 
-The complete final gradient state is materialized only after bounded execution for validation. AdamW updates are intentionally deferred to the next milestone.
+The complete final gradient state is materialized only after bounded execution for validation.
+
+### Bounded AdamW and atomic step publication
+
+Version 0.8 adds one complete optimizer update:
+
+- consume the validated final-gradient store;
+- apply one canonical global clipping coefficient;
+- read one unique parameter group, matching gradients, and Adam first and second moments at a time;
+- update tied token embeddings exactly once;
+- build candidate parameter and optimizer stores group by group;
+- compare the complete candidate state with a resident PyTorch oracle;
+- restore and re-export the candidate state for exact validation;
+- publish a root step-bundle manifest only after every candidate store verifies;
+- preserve the previous bundle when publication is interrupted before the root `CURRENT` replacement.
+
+The complete candidate and oracle states are materialized together only after bounded execution for validation. Multiple consecutive bounded steps are not yet implemented.
 
 ## Validated Apple M2 evidence
 
@@ -126,6 +142,18 @@ A clean MacBook Air M2 run with 8 GB unified memory validated version 0.6.0 at c
 - a clean source tree.
 
 Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes. These counters are not summed as physical-memory equivalents.
+
+A clean version 0.7.0 run at commit `c72dcc2f8d8a7bd783ae263cf14476d0681b664b` then validated bounded backward on the same target:
+
+- Ruff, mypy, 62 tests with one skip, and compileall passed;
+- two micro runs were GREEN and bitwise exact;
+- the 443,648-parameter tiny run was GREEN;
+- reverse group order, oracle release, parameter-manifest immutability, tied-gradient versioning, and both working-set rejections passed;
+- maximum loss and tensor-gradient differences were zero;
+- maximum global-norm difference was about `9.57e-08`;
+- parameter, oracle-gradient, and bounded-gradient stores verified and recovered;
+- swap growth was zero and no fallback or unsupported operation was detected;
+- the repository remained clean.
 
 The earlier resident 23,213,056-parameter benchmark produced:
 
@@ -209,10 +237,22 @@ microcolossus bounded-backward \
   --gradient-working-set-mib 1
 ```
 
+One complete bounded AdamW step:
+
+```bash
+microcolossus bounded-step \
+  --config examples/micro-storage.yaml \
+  --bundle-store runs/micro-bounded-step \
+  --output runs/micro-bounded-step.json \
+  --device cpu \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1 \
+  --optimizer-working-set-mib 4
+```
+
 ## Not yet implemented
 
-- streamed AdamW parameter and optimizer-state updates;
-- atomic publication of a complete bounded optimizer step;
+- multiple consecutive bounded steps, checkpoint, and resume;
 - activation recomputation from storage or activation offload;
 - asynchronous prefetch and writeback;
 - intra-layer tiling;
