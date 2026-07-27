@@ -200,7 +200,17 @@ def test_resume_detects_corrupt_current_child_store(tmp_path: Path) -> None:
         )
 
 
-def test_later_bundle_failure_preserves_previous_step(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        BundleFailurePoint.BEFORE_MANIFEST_RENAME,
+        BundleFailurePoint.BEFORE_CURRENT_RENAME,
+    ],
+)
+def test_later_bundle_failure_preserves_previous_step(
+    tmp_path: Path,
+    failure_point: BundleFailurePoint,
+) -> None:
     config = _config(tmp_path)
     bundle_path = tmp_path / "bundle"
     run_bounded_training(
@@ -213,8 +223,8 @@ def test_later_bundle_failure_preserves_previous_step(tmp_path: Path) -> None:
 
     def fail(point: BundleFailurePoint, context: dict[str, object]) -> None:
         del context
-        if point is BundleFailurePoint.BEFORE_CURRENT_RENAME:
-            raise BundleSimulatedCrash("stop before later CURRENT replacement")
+        if point is failure_point:
+            raise BundleSimulatedCrash(f"stop at {point.value} during later step")
 
     with pytest.raises(BundleSimulatedCrash):
         run_bounded_training(
