@@ -340,7 +340,14 @@ def _apply_adamw_group(
     optimizer_payloads: dict[str, dict[str, TensorPayload]],
     clipping_coefficient: float,
     device: torch.device,
-) -> tuple[tuple[TensorPayload, ...], tuple[TensorPayload, ...]]:
+) -> tuple[
+    tuple[TensorPayload, ...],
+    tuple[TensorPayload, ...],
+    float,
+    float,
+    float,
+]:
+    materialization_started = time.perf_counter()
     parameters: list[nn.Parameter] = []
     names: list[str] = []
     parameter_payload_map = {item.logical_name: item for item in parameter_payloads}
@@ -372,9 +379,13 @@ def _apply_adamw_group(
         optimizer.state[parameter]["exp_avg_sq"] = payload_to_torch(
             state_payloads["exp_avg_sq"], device=device
         )
+    materialization_seconds = time.perf_counter() - materialization_started
+    optimizer_started = time.perf_counter()
     optimizer.step()
     synchronize_accelerator(device)
+    optimizer_seconds = time.perf_counter() - optimizer_started
 
+    export_started = time.perf_counter()
     updated_parameters: list[TensorPayload] = []
     updated_optimizer: list[TensorPayload] = []
     for logical_name, parameter in zip(names, parameters, strict=True):
@@ -398,11 +409,14 @@ def _apply_adamw_group(
                     metadata=original_state.metadata,
                 )
             )
+    export_seconds = time.perf_counter() - export_started
     return (
         tuple(sorted(updated_parameters, key=lambda item: item.logical_name)),
         tuple(sorted(updated_optimizer, key=lambda item: item.logical_name)),
+        materialization_seconds,
+        optimizer_seconds,
+        export_seconds,
     )
-
 
 def run_bounded_optimizer_step(
     config: ExperimentConfig,
@@ -417,6 +431,7 @@ def run_bounded_optimizer_step(
 ) -> BoundedOptimizerResult:
     """Execute one bounded AdamW step and atomically publish its state bundle."""
 
+    seed_everything(config.training.seed)
     if optimizer_working_set_bytes <= 0:
         raise ValueError("optimizer_working_set_bytes must be greater than zero")
     destination = Path(bundle_store_path)
@@ -547,10 +562,13 @@ def run_bounded_optimizer_step(
             }
         optimizer_state_read_seconds = time.perf_counter() - optimizer_read_started
 
-        materialization_started = time.perf_counter()
-        materialization_seconds = time.perf_counter() - materialization_started
-        optimizer_started = time.perf_counter()
-        updated_parameters, updated_optimizer = _apply_adamw_group(
+        (
+            updated_parameters,
+            updated_optimizer,
+            materialization_seconds,
+            optimizer_seconds,
+            export_seconds,
+        ) = _apply_adamw_group(
             config=config,
             parameter_payloads=parameter_payloads,
             gradient_payloads=gradient_payloads,
@@ -558,14 +576,11 @@ def run_bounded_optimizer_step(
             clipping_coefficient=backward.future_clip_coefficient,
             device=device,
         )
-        optimizer_seconds = time.perf_counter() - optimizer_started
         accelerator_after_optimizer = accelerator_memory_metrics(device)
         process_rss = process_rss_bytes()
 
-        export_started = time.perf_counter()
         updated_parameter_checksum = _payload_digest(updated_parameters)
         updated_optimizer_checksum = _payload_digest(updated_optimizer)
-        export_seconds = time.perf_counter() - export_started
 
         parameter_commit_started = time.perf_counter()
         parameter_commit = _commit_payloads(
