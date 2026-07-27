@@ -1,16 +1,14 @@
-# Versioned Tensor Store
+# Versioned Tensor Store and Bounded Execution
 
-This document describes the synchronous storage foundation introduced in MicroColossus 0.4.0 and the observable micro training lifecycle introduced in 0.5.0.
+This document describes the storage foundation introduced in MicroColossus 0.4, the observable storage-backed optimizer lifecycle introduced in 0.5, and the first bounded parameter-group forward executor introduced in 0.6.
 
 ## Scope
 
-The tensor store is the first component that can keep canonical model and optimizer state outside framework-owned memory. It is backend-neutral and does not depend on `torch.Tensor` or `mlx.core.array` internally.
+The tensor store keeps canonical model and optimizer state outside framework-owned memory. Its internal representation does not depend on `torch.Tensor` or `mlx.core.array`.
 
-Version 0.4.0 implements storage, integrity, versioning, transactions, recovery, budgets, telemetry, and framework adapters. Version 0.5.0 connects that foundation to one fully observed micro optimizer step.
+The 0.5 optimizer lifecycle still materializes the complete micro model and optimizer for compute. The 0.6 bounded forward path instead materializes one declared parameter execution group at a time. It retains hidden activations and does not yet implement bounded backward or optimizer execution.
 
-The compute phase still materializes the complete micro model and optimizer. Bounded layer-wise execution is a later milestone.
-
-## Layout
+## Store layout
 
 ```text
 store/
@@ -27,11 +25,11 @@ store/
     events.jsonl
 ```
 
-Chunks are content-addressed by SHA-256. Published manifests are immutable. `CURRENT` is the only authoritative pointer and is replaced atomically after a candidate manifest and all referenced chunks have been written, synchronized, and validated.
+Chunks are content-addressed by SHA-256. Published manifests are immutable. `CURRENT` is the authoritative pointer and is replaced atomically only after all candidate chunks and the candidate manifest have been written, synchronized, and validated.
 
 ## Canonical tensor representation
 
-Each tensor records:
+Each tensor record contains:
 
 ```text
 tensor_id
@@ -42,22 +40,22 @@ dtype
 byte_order
 version
 ordered chunk IDs
-byte length
+byte_length
 whole-tensor checksum
-committed step
+committed_step
 adapter metadata
 ```
 
 Initial tensor kinds are:
 
-- `parameter`
-- `gradient`
-- `adam_first_moment`
-- `adam_second_moment`
-- `master_weight`
-- `metadata`
+- `parameter`;
+- `gradient`;
+- `adam_first_moment`;
+- `adam_second_moment`;
+- `master_weight`;
+- `metadata`.
 
-Multi-byte values use canonical little-endian storage. Non-contiguous NumPy inputs are normalized to contiguous logical bytes before checksumming and chunking.
+Multi-byte values use canonical little-endian storage. Non-contiguous inputs are normalized to contiguous logical bytes before checksumming and chunking.
 
 ## Transaction protocol
 
@@ -69,15 +67,15 @@ prepared -> writing -> validated -> committed
                              -> aborted
 ```
 
-The commit sequence is synchronous:
+The synchronous commit path is:
 
 1. build a copy-on-write candidate manifest;
 2. calculate tensor and chunk checksums;
-3. reject the transaction if storage or staging limits would be exceeded;
+3. reject the transaction when storage or staging limits would be exceeded;
 4. write each new chunk through a transaction-local partial file;
 5. flush and `fsync` the chunk;
-6. atomically rename the chunk into the content-addressed chunk directory;
-7. read and validate every candidate chunk and tensor;
+6. atomically rename the chunk into the content-addressed directory;
+7. read and validate all candidate chunks and tensors;
 8. write and `fsync` the candidate manifest;
 9. atomically publish the manifest file;
 10. write and `fsync` a candidate `CURRENT` pointer;
@@ -86,9 +84,9 @@ The commit sequence is synchronous:
 
 Until step 11 completes, the previous manifest remains authoritative.
 
-## Recovery
+## Recovery and failure injection
 
-`store-recover` verifies the current committed state and scans transaction journals. An incomplete transaction is marked aborted without publishing its candidate manifest.
+`store-recover` verifies the current state and marks incomplete transactions aborted without publishing their candidate manifest.
 
 Recovery reports, but does not silently delete:
 
@@ -97,11 +95,7 @@ Recovery reports, but does not silently delete:
 - unpublished manifests;
 - temporary pointer or manifest files.
 
-This conservative policy preserves forensic evidence and avoids making cleanup decisions during correctness validation.
-
-## Failure injection
-
-The test suite can interrupt commits at:
+Tests and target-hardware diagnostics inject interruptions:
 
 - before a chunk write;
 - during a partial chunk write;
@@ -109,26 +103,26 @@ The test suite can interrupt commits at:
 - before manifest rename;
 - before `CURRENT` rename.
 
-Every tested interruption must leave the previously committed manifest authoritative.
+Every validated interruption leaves the prior committed manifest authoritative.
 
 ## Budgets
 
-`StoreLimits` configures:
+`StoreLimits` defines:
 
 - chunk size;
-- maximum storage content;
+- maximum managed storage content;
 - maximum internal staging buffer.
 
-The first implementation is intentionally conservative. A transaction is rejected before publication when its projected content exceeds the configured storage limit. Each chunk must fit inside the staging limit.
+The bounded forward command adds a separate logical parameter working-set budget. An execution group is rejected before compute when its referenced parameter bytes exceed that budget.
+
+The current budget is a logical managed-parameter limit. It is not a claim that process RSS, framework allocation, driver allocation, activations, and operating-system pressure are all captured by one number.
 
 ## Telemetry
 
-Commit, read, range-read, chunk-read, and recovery operations report:
+Store operations report:
 
-- logical bytes read and written;
-- physical bytes read and written;
-- chunk reads and writes;
-- reused chunks;
+- logical and physical bytes read or written;
+- chunk reads, writes, and reuse;
 - checksum time;
 - read and write time;
 - `fsync` time;
@@ -137,22 +131,30 @@ Commit, read, range-read, chunk-read, and recovery operations report:
 - current store size;
 - cumulative managed-state bytes written.
 
-The observable storage step adds:
+The observable optimizer lifecycle also reports:
 
-- state-read time;
-- model and optimizer materialization time;
-- forward time;
-- backward time;
-- gradient-clipping time;
-- optimizer-update time;
+- state-read and materialization time;
+- forward, backward, clipping, and optimizer time;
 - state-export time;
 - loss and global gradient norm;
-- process RSS and accelerator allocator samples;
-- initial, updated, and restored canonical state digests;
-- tensor-level numerical comparison with the resident oracle;
-- committed tensor versions.
+- process RSS and accelerator samples;
+- canonical state digests and tensor versions;
+- numerical distance from the resident oracle.
 
-Filesystem metadata, APFS copy-on-write behavior, write amplification, and device-level NAND writes are not inferred from these counters. Those require target-hardware measurement.
+The bounded forward executor reports for every group:
+
+- group ordinal and logical tensor names;
+- tensor and referenced-chunk count;
+- logical parameter bytes;
+- read, materialization, compute, and release time;
+- input and output activation bytes;
+- activation checksum;
+- numerical distance from the matching resident boundary;
+- process RSS;
+- accelerator allocation after materialization, compute, and release;
+- Metal driver allocation when available.
+
+Filesystem metadata, APFS copy-on-write behavior, controller behavior, and NAND-level writes are not inferred from application counters.
 
 ## Framework adapters
 
@@ -160,54 +162,68 @@ The PyTorch adapter exports and restores:
 
 - unique model parameters;
 - buffers;
-- AdamW first moments;
-- AdamW second moments;
+- AdamW first and second moments;
 - optimizer step tensors;
 - scalar parameter-group settings.
 
-The MLX adapter exports and restores flattened model and optimizer trees through canonical NumPy-compatible arrays. The MLX path requires validation on the target Mac M2.
+The MLX adapter exports and restores flattened model and optimizer trees through canonical NumPy-compatible arrays.
 
-The store itself remains independent of both frameworks.
+The store and manifest format remain independent of both frameworks.
+
+## Observable storage-backed optimizer step
+
+`storage-step` performs:
+
+1. deterministic model and AdamW initialization;
+2. canonical export and initial commit;
+3. destruction of the bootstrap objects;
+4. one independently restored resident reference update;
+5. restoration of the same initial state from storage;
+6. the same forward, backward, clipping, and AdamW update;
+7. tensor-level comparison with the resident reference;
+8. atomic publication of the updated state;
+9. restoration of the committed update;
+10. exact comparison with the state that was published.
+
+CPU validation requires exact bytes. MPS validation reports both bitwise equality and tensor-level numerical distance.
+
+## Bounded parameter-group forward
+
+`bounded-forward` creates a parameter-only store, releases the bootstrap and resident models, and executes this plan:
+
+```text
+embedding weights
+  read -> materialize -> compute -> release
+
+Transformer block 0
+  read -> materialize -> compute -> release
+
+Transformer block N
+  read -> materialize -> compute -> release
+
+final normalization and output projection
+  read -> materialize -> compute -> release
+```
+
+When token embedding and output projection weights are tied, the token embedding is read again for the final group. It is not retained from the embedding group.
+
+The resident oracle records the embedding output, every block output, final logits, and loss. The bounded executor compares every corresponding boundary.
+
+The first implementation retains hidden activations between groups. Its bounded claim applies to managed parameter residency only.
 
 ## Development scale ladder
 
-Routine development must not require a long 18M or 23M parameter run. MicroColossus uses multiple validation scales:
+1. **Unit scale**. Bytes, arrays, operators, corruption, and failure injection.
+2. **Micro model**. A sub-million-parameter Transformer for each complete runtime path.
+3. **Small real training**. A few-million-parameter model on a real text corpus with validation, checkpoint, resume, and sample generation.
+4. **Milestone scale**. Larger runs after the same path is correct at smaller scales.
+5. **Capacity demonstrations**. 124M, 350M, and larger targets after bounded storage-backed training exists.
 
-1. **Unit scale**. Byte payloads, small arrays, isolated operators, transaction states, corruption, and failure injection.
-2. **Micro model**. A sub-million-parameter Transformer for every end-to-end storage-backed path. It exposes detailed loss, gradient, tensor-version, memory, I/O, and timing telemetry.
-3. **Small real-training model**. A few-million-parameter model on a small real text corpus. It will validate training and validation loss, checkpoint and resume, and sample generation.
-4. **Milestone scale**. Larger resident or storage-backed models run only after the same path passes at smaller scales.
-5. **Capacity demonstration**. The 124M, 350M, and larger targets remain later research gates.
-
-Small models accelerate iteration. They do not replace real training, resident-versus-storage numerical comparison, or larger-than-resident capacity demonstrations.
-
-A future external training project may become a real-training frontend. The tensor store, planner, transaction protocol, telemetry, and backend interfaces must remain independent of that frontend.
-
-## Observable micro storage step
-
-The `storage-step` experiment performs this sequence:
-
-1. create deterministic model and AdamW state on CPU;
-2. export it into the canonical representation;
-3. commit the initial state to a new store;
-4. destroy the original resident objects;
-5. restore one independent resident reference instance;
-6. execute one observed full-parameter update;
-7. release that model before materializing the storage-backed instance;
-8. restore the same initial state from the store;
-9. execute the same batch and optimizer update;
-10. compare final model and optimizer state with the resident oracle;
-11. publish all updated tensor versions atomically;
-12. restore the committed update into a third instance;
-13. compare the third instance with the state that was published.
-
-CPU validation requires exact bytes. MPS validation reports both bitwise equality and tensor-level numerical distance because Metal reductions may not be bitwise reproducible.
-
-This experiment validates the storage lifecycle around compute. It does not reduce the compute working set yet.
+Small models accelerate iteration. They do not replace real training or larger-than-resident demonstrations.
 
 ## CLI
 
-Create an empty store:
+Create and inspect a store:
 
 ```bash
 microcolossus store-init \
@@ -215,21 +231,12 @@ microcolossus store-init \
   --chunk-size-mib 4 \
   --max-staging-mib 16 \
   --max-storage-gib 100
-```
 
-Verify the current manifest and all data:
-
-```bash
 microcolossus store-verify --path runs/store
-```
-
-Recover incomplete transactions conservatively:
-
-```bash
 microcolossus store-recover --path runs/store
 ```
 
-Run the fast CPU micro lifecycle:
+Run the observable optimizer lifecycle:
 
 ```bash
 microcolossus storage-step \
@@ -239,54 +246,46 @@ microcolossus storage-step \
   --device cpu
 ```
 
-On the target Mac, use `--device mps` with the same micro preset first, then repeat with `examples/tiny-mps.yaml` only after the micro run passes.
+Run the bounded forward reference:
 
-## Current validation
+```bash
+microcolossus bounded-forward \
+  --config examples/micro-storage.yaml \
+  --store runs/micro-bounded-forward-store \
+  --output runs/micro-bounded-forward.json \
+  --device cpu \
+  --parameter-working-set-mib 1
+```
 
-The isolated storage validation completed:
+## Validated 0.5 target-hardware result
 
-- PyTorch model and AdamW state round-tripped exactly;
-- corruption was detected;
-- copy-on-write versions reused unchanged chunks;
-- scalar, zero-length, non-contiguous, and big-endian inputs were covered;
-- every injected interruption preserved the previous manifest;
-- CLI initialization, verification, and recovery completed.
+A clean MacBook Air M2 run with 8 GB unified memory validated commit `82e53c671848d231c2361443882b97dbe4e3a408`:
 
-The integrated GitHub Actions matrix passes on Python 3.11 and 3.13:
+- Ruff, mypy, 52 tests, and compileall passed;
+- two MPS micro storage-step runs were GREEN and bitwise repeatable;
+- the 443,648-parameter tiny MPS storage-step was GREEN;
+- resident-versus-storage loss, gradient norm, and final canonical state differences were zero;
+- storage-versus-restored state was exact;
+- all five interruption points preserved the previous committed manifest;
+- MLX micro and tiny round trips were exact;
+- PyTorch-versus-MLX canonical model state was GREEN;
+- no fallback, unsupported operation, non-finite value, allocation failure, or swap growth was detected;
+- the repository remained clean.
 
-- installation;
-- Ruff;
-- mypy;
-- the complete pytest suite;
-- bytecode compilation;
-- resident CPU training and benchmark smoke tests;
-- tensor-store initialization, verification, and recovery smoke tests;
-- one complete observable CPU storage-step smoke test;
-- final store verification after the update.
+The run reported `7,468,738` bytes read across `226` referenced chunks and `7,641,680` bytes written across `166` chunk writes, with `60` reused chunks. Maximum observed RSS was `432,472,064` bytes. Maximum MPS allocation was `8,709,376` bytes. Maximum Metal driver allocation was `28,049,408` bytes.
 
-The CPU integration tests also require:
+## Current boundary
 
-- exact resident-versus-storage model and AdamW state;
-- exact committed-versus-restored state;
-- deterministic repeated state and batch digests;
-- previous-state recovery after an interrupted update;
-- NumPy-independent batch checksums;
-- explicit detection of a modified tensor.
+MicroColossus does not yet establish:
 
-The MLX adapter and the MPS storage-step still require clean target-M2 validation.
-
-## Explicitly not validated
-
-Version 0.5.0 does not establish:
-
-- bounded layer-wise storage-to-accelerator execution;
-- optimizer execution without materializing the complete micro state;
-- activation offloading;
+- bounded backward propagation;
+- stored or streamed gradients;
+- bounded AdamW execution;
+- activation recomputation or offload;
 - asynchronous prefetch or writeback;
-- direct I/O;
-- compression;
 - intra-layer tiling;
+- direct I/O or compression;
 - real-corpus language-model training;
 - training state larger than safe resident unified memory.
 
-The next bounded-execution milestone will keep authoritative state in this store while loading and updating only a declared execution group at a time.
+The next step after target validation of bounded forward is a reverse-order bounded backward path, followed by a second streamed pass for global clipping and AdamW publication.
