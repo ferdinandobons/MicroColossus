@@ -1,3 +1,4 @@
+import math
 from copy import deepcopy
 
 import pytest
@@ -25,6 +26,29 @@ def test_explicit_mps_reports_unavailable_build(monkeypatch) -> None:
     monkeypatch.setattr(training_module, "mps_is_built", lambda: False)
     with pytest.raises(RuntimeError, match="no MPS support"):
         resolve_device("mps")
+
+
+def test_gradient_norm_does_not_require_float64_tensors(monkeypatch) -> None:
+    model = DecoderOnlyTransformer(
+        ModelConfig(
+            vocab_size=32,
+            max_sequence_length=8,
+            layers=1,
+            heads=2,
+            hidden_size=16,
+            mlp_ratio=2,
+        )
+    )
+    for parameter in model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+
+    def fail_double(_tensor: torch.Tensor) -> None:
+        raise AssertionError("gradient norm must not create float64 tensors")
+
+    monkeypatch.setattr(torch.Tensor, "double", fail_double)
+
+    expected = math.sqrt(sum(parameter.numel() for parameter in model.parameters()))
+    assert training_module._gradient_norm(model) == pytest.approx(expected)
 
 
 def test_resident_step_is_reproducible_on_cpu() -> None:
