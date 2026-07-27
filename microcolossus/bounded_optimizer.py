@@ -342,6 +342,7 @@ def _resident_oracle(
         store_commit=commit.telemetry,
     )
 
+
 def _apply_adamw_group(
     *,
     config: ExperimentConfig,
