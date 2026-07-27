@@ -543,6 +543,7 @@ def run_bounded_backward(
             backward_seconds = time.perf_counter() - backward_started
             bounded_loss = float(loss.detach().cpu().item())
             output_activation_bytes = _activation_bytes(output)
+            del loss
         elif spec.name.startswith("block-"):
             local_input = _group_input_activation(spec, groups, activations).to(device)
             local_input.requires_grad_(True)
