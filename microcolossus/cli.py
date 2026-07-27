@@ -136,9 +136,14 @@ def _parser() -> argparse.ArgumentParser:
         help="new immutable parameter tensor store directory",
     )
     bounded_backward.add_argument(
+        "--oracle-gradient-store",
+        required=True,
+        help="new resident-oracle gradient tensor store directory",
+    )
+    bounded_backward.add_argument(
         "--gradient-store",
         required=True,
-        help="new versioned gradient tensor store directory",
+        help="new bounded gradient tensor store directory",
     )
     bounded_backward.add_argument("--output", required=True, help="result JSON path")
     bounded_backward.add_argument(
@@ -265,6 +270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_bounded_backward(
             config,
             parameter_store_path=args.parameter_store,
+            oracle_gradient_store_path=args.oracle_gradient_store,
             gradient_store_path=args.gradient_store,
             output_path=args.output,
             device_override=args.device,
