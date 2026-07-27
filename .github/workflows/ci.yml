@@ -28,62 +28,45 @@ jobs:
 
           path = Path("microcolossus/storage/store.py")
           text = path.read_text()
-          abort_old = '''        _append_journal_entry(
-              self.store.root,
-              transaction_id=self.transaction_id,
-              state=self._state,
-              parent_manifest_id=self.parent.manifest_id,
-              candidate_manifest_id=self.candidate_manifest_id,
-              intended_chunk_ids=(),
-              written_chunk_ids=tuple(self._written_chunk_ids),
-              message=message,
+          abort_marker = "        )\n\n    def _inject(self, point: FailurePoint, **context: Any) -> None:\n"
+          abort_replacement = (
+              "        )\n"
+              "        self._payloads.clear()\n"
+              "        self._explicit_versions.clear()\n\n"
+              "    def _inject(self, point: FailurePoint, **context: Any) -> None:\n"
           )
-  
-      def _inject(self, point: FailurePoint, **context: Any) -> None:
-          if self.failure_injector is not None:
-              self.failure_injector(point, context)
-  '''
-          abort_new = '''        _append_journal_entry(
-              self.store.root,
-              transaction_id=self.transaction_id,
-              state=self._state,
-              parent_manifest_id=self.parent.manifest_id,
-              candidate_manifest_id=self.candidate_manifest_id,
-              intended_chunk_ids=(),
-              written_chunk_ids=tuple(self._written_chunk_ids),
-              message=message,
+          commit_marker = (
+              "        telemetry = self.store._record_telemetry(\n"
+              "            telemetry,\n"
+              "            counted_writes=physical_chunk_bytes + metadata_bytes_written,\n"
+              "        )\n"
+              "        return CommitResult(manifest=candidate, telemetry=telemetry)\n"
           )
-          self._payloads.clear()
-          self._explicit_versions.clear()
-  
-      def _inject(self, point: FailurePoint, **context: Any) -> None:
-          if self.failure_injector is not None:
-              self.failure_injector(point, context)
-  '''
-          commit_old = '''        telemetry = self.store._record_telemetry(
-              telemetry,
-              counted_writes=physical_chunk_bytes + metadata_bytes_written,
+          commit_replacement = (
+              "        telemetry = self.store._record_telemetry(\n"
+              "            telemetry,\n"
+              "            counted_writes=physical_chunk_bytes + metadata_bytes_written,\n"
+              "        )\n"
+              "        self._payloads.clear()\n"
+              "        self._explicit_versions.clear()\n"
+              "        return CommitResult(manifest=candidate, telemetry=telemetry)\n"
           )
-          return CommitResult(manifest=candidate, telemetry=telemetry)
-  '''
-          commit_new = '''        telemetry = self.store._record_telemetry(
-              telemetry,
-              counted_writes=physical_chunk_bytes + metadata_bytes_written,
-          )
-          self._payloads.clear()
-          self._explicit_versions.clear()
-          return CommitResult(manifest=candidate, telemetry=telemetry)
-  '''
-          if abort_old not in text:
-              if "        self._payloads.clear()\n        self._explicit_versions.clear()\n\n    def _inject" not in text:
-                  raise SystemExit("abort payload-release target not found")
-          else:
-              text = text.replace(abort_old, abort_new, 1)
-          if commit_old not in text:
-              if "        self._payloads.clear()\n        self._explicit_versions.clear()\n        return CommitResult" not in text:
-                  raise SystemExit("commit payload-release target not found")
-          else:
-              text = text.replace(commit_old, commit_new, 1)
+          if "    def abort(" not in text:
+              raise SystemExit("abort method not found")
+          abort_start = text.index("    def abort(")
+          inject_start = text.index("    def _inject", abort_start)
+          abort_section = text[abort_start:inject_start]
+          if "self._payloads.clear()" not in abort_section:
+              marker_index = text.index(abort_marker, abort_start)
+              text = text[:marker_index] + text[marker_index:].replace(
+                  abort_marker,
+                  abort_replacement,
+                  1,
+              )
+          if commit_marker in text:
+              text = text.replace(commit_marker, commit_replacement, 1)
+          elif "self._payloads.clear()\n        self._explicit_versions.clear()\n        return CommitResult" not in text:
+              raise SystemExit("commit payload-release target not found")
           path.write_text(text)
           PY
       - name: Publish transaction payload release
