@@ -6,11 +6,12 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .storage import IntegrityError, VersionedTensorStore
 from .storage.schema import canonical_json_bytes, sha256_hex
