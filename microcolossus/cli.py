@@ -122,6 +122,43 @@ def _parser() -> argparse.ArgumentParser:
         default=1.0,
         help="maximum logical parameter bytes materialized for one execution group",
     )
+
+    bounded_backward = subcommands.add_parser(
+        "bounded-backward",
+        help="compare resident gradients with group-bounded backward propagation",
+    )
+    bounded_backward.add_argument(
+        "--config", required=True, help="path to an experiment YAML file"
+    )
+    bounded_backward.add_argument(
+        "--parameter-store",
+        required=True,
+        help="new immutable parameter tensor store directory",
+    )
+    bounded_backward.add_argument(
+        "--gradient-store",
+        required=True,
+        help="new versioned gradient tensor store directory",
+    )
+    bounded_backward.add_argument("--output", required=True, help="result JSON path")
+    bounded_backward.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default=None,
+        help="override configured execution device",
+    )
+    bounded_backward.add_argument(
+        "--parameter-working-set-mib",
+        type=float,
+        default=1.0,
+        help="maximum logical parameter bytes materialized for one group",
+    )
+    bounded_backward.add_argument(
+        "--gradient-working-set-mib",
+        type=float,
+        default=1.0,
+        help="maximum logical gradient bytes materialized for one group",
+    )
     return parser
 
 
@@ -217,6 +254,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_path=args.output,
             device_override=args.device,
             parameter_working_set_bytes=int(args.parameter_working_set_mib * mib),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "bounded-backward":
+        from .bounded_backward import run_bounded_backward
+
+        mib = 1024**2
+        result = run_bounded_backward(
+            config,
+            parameter_store_path=args.parameter_store,
+            gradient_store_path=args.gradient_store,
+            output_path=args.output,
+            device_override=args.device,
+            parameter_working_set_bytes=int(args.parameter_working_set_mib * mib),
+            gradient_working_set_bytes=int(args.gradient_working_set_mib * mib),
         )
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return 0
