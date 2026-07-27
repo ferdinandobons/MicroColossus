@@ -2,59 +2,59 @@
 
 > **Trade memory for time.**
 
-This document defines the project, architecture, evidence, competitive rules, and development path.
+This document defines the purpose, constraints, architecture, verified evidence, and development path of MicroColossus.
 
 ## 1. Purpose
 
-MicroColossus explores full-parameter training when the complete training state cannot remain resident in available memory.
+MicroColossus explores full-parameter training when the complete training state cannot remain safely resident in available memory.
 
 The central question is:
 
-> How can a runtime execute a valid update while active computation remains inside explicit memory, storage, time, and endurance budgets?
+> How can a runtime execute valid model updates while active computation remains inside explicit memory, storage, time, correctness, recovery, and endurance budgets?
 
-The primary target is Apple Silicon, beginning with a Mac M2 with 8 GB of unified memory and local NVMe storage.
+The primary target is Apple Silicon, beginning with a MacBook Air M2 with 8 GB unified memory and local NVMe storage.
 
-MicroColossus does not promise infinite models, datacenter throughput, or elimination of total compute. Storage capacity, memory pressure, minimum useful tile size, compute, bandwidth, SSD endurance, and elapsed time remain physical constraints.
+MicroColossus does not promise infinite models, datacenter throughput, or elimination of compute cost. Storage capacity, memory pressure, bandwidth, minimum useful tile size, SSD endurance, and elapsed time remain physical constraints.
 
 ## 2. Why the project exists
 
-Training requires more than model weights. A full step may require:
+Training requires more than model weights. A full update may require:
 
 - parameter gradients;
-- optimizer states;
+- Adam first and second moments;
 - optional master-weight copies;
-- saved activations or recomputation metadata;
+- activations or recomputation metadata;
 - logits and loss intermediates;
-- temporary tensors and operator workspaces;
-- allocator, framework, driver, and operating-system overhead.
+- temporary operator workspaces;
+- framework, driver, and operating-system overhead.
 
-A machine may have enough storage for the complete state but insufficient safe resident memory. MicroColossus treats that mismatch as a scheduling problem whose complete cost must be measured.
+A machine can have enough storage for the complete state but insufficient safe resident memory. MicroColossus treats that mismatch as a scheduling and transaction problem whose complete cost must be measured.
 
 ## 3. Apple Silicon design rules
 
-Apple Silicon CPU and GPU workloads share unified physical memory.
+Apple Silicon CPU and GPU workloads share one physical memory pool.
 
 ### Placement is not capacity offload
 
-Moving a tensor from CPU execution to MPS changes placement and execution. It does not create a second physical memory pool. Keeping CPU and accelerator copies can increase pressure on the same memory.
+Moving a tensor from CPU execution to MPS changes placement and execution. It does not create another physical memory pool. Keeping CPU and accelerator copies can increase pressure on the same unified memory.
 
 ### Memory counters overlap
 
-Process RSS, framework allocator values, Metal driver allocation, compressed memory, and swap are different views of memory behavior. They must not be added as separate physical pools.
+Process RSS, PyTorch MPS allocation, Metal driver allocation, MLX allocator values, compressed memory, and swap describe different or overlapping scopes. They are never added as separate physical capacities.
 
-### NVMe is the capacity tier
+### NVMe is the first external capacity tier
 
 ```text
-MLX or MPS execution and active tensor working set
-                         |
-bounded unified-memory staging and runtime state
-                         |
+MLX or MPS active working set
+              |
+bounded unified-memory staging and activations
+              |
 versioned NVMe tensor store
 ```
 
 ### Memory pressure is a planning input
 
-The planner must consider active allocations, process footprint, macOS pressure, compression, swap, storage traffic, SSD writes, and step time together.
+The planner must consider active tensors, process footprint, macOS pressure, compression, swap, storage traffic, SSD writes, and step time together.
 
 ## 4. Central hypothesis
 
@@ -62,19 +62,19 @@ For a useful class of Transformer models and training recipes, part of resident-
 
 - versioned tensor storage;
 - bounded staging and caches;
+- parameter-group execution;
 - activation recomputation;
-- layer-wise execution;
 - intra-layer tiling;
 - asynchronous prefetch and writeback;
 - additional elapsed time.
 
-Minimum capacity relationships are:
+Necessary capacity relationships include:
 
 ```text
-model state + checkpoints + metadata <= allocated NVMe capacity
+model state + checkpoints + metadata <= allocated storage capacity
 
-active parameter tiles + activations + workspaces + runtime buffers
-    <= safe accelerator working set
+active parameter group or tile + activations + workspaces + runtime buffers
+    <= safe execution working set
 
 process state + staging + operating overhead
     remains below safe unified-memory pressure
@@ -87,16 +87,16 @@ These conditions are necessary but not sufficient. A viable schedule must also s
 MicroColossus aims to:
 
 1. train models whose complete state cannot remain safely resident;
-2. keep only the active working set available to accelerator execution;
+2. keep only the active parameter group or tile available to accelerator execution;
 3. keep inactive parameter and optimizer chunks on NVMe;
 4. apply explicit memory, storage, write, and time budgets;
-5. recompute selected activations;
+5. recompute or offload selected activations;
 6. tile an operation when it cannot fit as a whole;
-7. preserve a full-parameter reference path;
-8. track identity, version, location, and integrity of managed chunks;
+7. preserve a full-parameter numerical reference path;
+8. track identity, version, location, and integrity of every managed tensor;
 9. publish optimizer steps atomically;
 10. recover the last committed state after interruption;
-11. report numerical distance, time, memory pressure, storage traffic, and writes.
+11. report numerical distance, memory pressure, storage traffic, elapsed time, and writes.
 
 ## 6. Boundaries
 
@@ -104,10 +104,10 @@ The project does not claim:
 
 - literally infinite models;
 - throughput equal to a well-provisioned cluster;
-- support for arbitrary PyTorch or MLX graphs in the initial runtime;
+- support for arbitrary PyTorch or MLX graphs in the first runtime;
 - feasibility for every architecture;
 - that CPU-to-MPS placement increases capacity;
-- that offloading, checkpointing, quantization, or tiling are new ideas;
+- that offloading, checkpointing, tiling, or quantization are new ideas;
 - success at a scale target before a reproducible demonstration.
 
 Parameter count alone is not a sufficient success metric.
@@ -116,7 +116,7 @@ Parameter count alone is not a sufficient success metric.
 
 Modes remain separate.
 
-- **`reference`**: all parameters are trainable. No silent adapters, low-rank gradient projections, or quantized optimizer states.
+- **`reference`**: all parameters are trainable. No silent adapters, low-rank gradient projection, or quantized optimizer state.
 - **`compact`**: future declared approximations such as quantized optimizer state or low-rank optimizer methods.
 - **`adapter`**: future LoRA or QLoRA path, reported separately from full-parameter execution.
 
@@ -125,27 +125,26 @@ Only `reference` is currently implemented.
 ## 8. Architecture
 
 ```text
-Dataset stream
-      |
+Dataset or deterministic batch stream
+                 |
 Controlled Transformer frontend
-      |
+                 |
 Tensor and dependency analysis
-      |
-Unified-memory-aware planner
-      |
-Execution schedule
-      |
-+----------------------------------+
-| Runtime                          |
-| - backend executor               |
-| - storage transfer engine        |
-| - activation manager             |
-| - optimizer engine               |
-| - checkpoint coordinator         |
-| - telemetry                      |
-+----------------------------------+
-      |
-bounded unified-memory working set <-> versioned NVMe tensor store
+                 |
+Unified-memory-aware execution plan
+                 |
++------------------------------------------------+
+| Runtime                                        |
+| - backend executor                             |
+| - versioned tensor store                       |
+| - transfer and staging coordinator             |
+| - activation manager                           |
+| - optimizer coordinator                        |
+| - transaction and recovery coordinator         |
+| - telemetry                                    |
++------------------------------------------------+
+                 |
+bounded active working set <-> versioned NVMe tensor store
 ```
 
 The intended components are:
@@ -155,7 +154,7 @@ The intended components are:
 - a planner for placement, tiling, prefetch, eviction, and recomputation;
 - bounded staging and accelerator working-set policies;
 - a chunked, versioned, recoverable tensor store;
-- layer-wise and tile-wise forward, backward, and optimizer execution;
+- group-wise and tile-wise forward, backward, and optimizer execution;
 - telemetry for memory, pressure, storage traffic, stalls, throughput, and writes.
 
 ## 9. Backend strategy
@@ -163,12 +162,14 @@ The intended components are:
 The current decision is **DUAL BACKEND**.
 
 - **MLX** is the preferred native Apple Silicon execution candidate.
-- **PyTorch MPS** remains the portable numerical oracle and reference implementation.
-- **Storage and transaction logic** must remain backend-neutral.
+- **PyTorch MPS** is the portable numerical oracle and reference implementation.
+- **Storage, transactions, and execution-plan schemas** remain backend-neutral.
 
-The decision is based on resident measurements, not storage-backed execution. The storage milestone must compare both adapters before assigning all future execution responsibilities.
+The decision is based on resident measurements. Every storage-backed path must be benchmarked independently before assigning all runtime responsibilities to one backend.
 
 ## 10. Current implementation
+
+### Resident and competitive execution
 
 Implemented:
 
@@ -177,131 +178,149 @@ Implemented:
 - deterministic synthetic training data;
 - resident full-parameter AdamW training;
 - CPU, MPS, CUDA, and automatic device selection;
-- real MPS diagnostics and synchronized telemetry;
-- NumPy-independent training checksums;
+- MPS diagnostics and synchronized telemetry;
 - static memory estimation with unified-memory warnings;
-- atomic JSON and JSONL run artifacts;
-- backend-neutral competitive benchmark schemas;
-- portable identical benchmark weights and batches;
-- synchronized PyTorch resident benchmark;
-- PyTorch activation-checkpointing benchmark;
-- equivalent MLX resident benchmark;
-- atomic final-state `.state.npz` artifacts;
-- tensor-level final-state comparison;
-- tests, linting, type checking, compilation, and CI smoke runs.
+- resident PyTorch MPS and MLX benchmark paths;
+- activation-checkpointed PyTorch baseline;
+- portable identical FP32 weights and batches;
+- tensor-level numerical comparison;
+- machine-readable run artifacts.
 
-Not implemented:
+### Versioned tensor store
 
-- storage-backed model or optimizer state;
-- NVMe-to-accelerator execution;
-- runtime-managed activation recomputation;
+Implemented:
+
+- explicit tensor, chunk, manifest, journal, and telemetry schemas;
+- canonical little-endian tensor bytes;
+- content-addressed immutable chunks;
+- copy-on-write tensor versions;
+- per-chunk and whole-tensor checksums;
+- immutable manifests and atomic `CURRENT` publication;
+- write-ahead transaction journals;
+- storage and staging-budget enforcement;
+- corruption detection;
+- conservative recovery and failure injection;
+- read, write, range-read, fsync, publication, recovery, and cumulative-write telemetry;
+- PyTorch model and AdamW export and restore;
+- MLX model and optimizer-tree export and restore.
+
+### Observable storage-backed optimizer lifecycle
+
+Implemented:
+
+- deterministic canonical bootstrap state;
+- initial storage commit;
+- destruction of bootstrap framework objects;
+- independently restored resident reference step;
+- storage restore, forward, backward, clipping, and AdamW step;
+- tensor-level resident-versus-storage comparison;
+- atomic publication of updated model and optimizer state;
+- post-commit restoration and exact verification;
+- detailed compute, memory, I/O, checksum, fsync, and publication telemetry.
+
+This lifecycle still materializes the complete micro model and optimizer during compute.
+
+### Bounded parameter-group forward
+
+Implemented in version 0.6:
+
+- parameter-only canonical store;
+- explicit execution groups for embeddings, each Transformer block, and the final head;
+- one group materialized at a time;
+- tied token-embedding reload for the output projection;
+- logical parameter working-set budget rejection;
+- resident boundary, logits, and loss comparison;
+- per-group read, materialization, compute, release, activation, RSS, accelerator, and driver telemetry;
+- immutable store verification after forward execution.
+
+The first bounded executor retains hidden activations and implements forward propagation only.
+
+### Not implemented
+
+- bounded backward propagation;
+- stored or streamed gradients;
+- bounded AdamW execution;
+- runtime-managed activation recomputation or offload;
 - asynchronous storage overlap;
-- hard runtime budget enforcement;
 - intra-layer tiling;
-- tensor journal and crash recovery;
+- direct I/O or compression;
+- real-corpus training frontend;
 - training state larger than safe resident unified memory.
 
 ## 11. Verified evidence
 
 ### Resident MPS foundation
 
-A clean independent run on commit `a56fc514f2f8e705654034f3c2f02e3a441c61f3` passed on a MacBook Air M2 with 8 GB unified memory.
-
-It validated:
-
-- native arm64 execution;
-- project checks;
-- MPS preflight;
-- explicit MPS training;
-- automatic MPS selection;
-- CPU-versus-MPS comparison;
-- fixed-batch learning from `5.566842079162598` to `0.4145740866661072`;
-- no detected fallback, unsupported operator, non-finite value, or MPS OOM;
-- a clean source tree.
-
-MPS was not bitwise reproducible by final checksum. Numerical reproducibility is evaluated with tensor-level tolerances and trajectories.
+A clean MacBook Air M2 run with 8 GB unified memory validated native arm64 MPS training, device selection, telemetry, CPU-versus-MPS comparison, and fixed-batch learning from `5.566842079162598` to `0.4145740866661072`.
 
 ### Competitive resident result
 
-A clean version `0.3.2` run completed all resident PyTorch MPS, checkpointed PyTorch MPS, and MLX variants on a 23,213,056-parameter workload.
+A controlled 23,213,056-parameter workload produced:
 
-Median throughput:
+| Variant | Median tokens/s | Relative to PyTorch |
+|---|---:|---:|
+| PyTorch MPS | 1,379.23 | 1.000x |
+| PyTorch MPS checkpointed | 1,337.37 | 0.970x |
+| MLX | 2,195.69 | 1.592x |
 
-| Variant | Tokens/s |
-|---|---:|
-| PyTorch MPS | 1,379.23 |
-| PyTorch MPS checkpointed | 1,337.37 |
-| MLX | 2,195.69 |
+PyTorch and MLX remained numerically close. Maximum loss difference was about `1.91e-06`, maximum final-parameter absolute difference was about `3.80e-05`, and all values remained finite across three rounds.
 
-MLX was approximately `1.592x` faster than PyTorch MPS in the measured resident workload.
+### Clean target storage validation
 
-PyTorch and MLX remained numerically close:
+Version 0.5.0, commit `82e53c671848d231c2361443882b97dbe4e3a408`, passed on a clean MacBook Air M2:
 
-- maximum loss difference: about `1.91e-06`;
-- maximum final-parameter absolute difference: about `3.80e-05`;
-- mean final-parameter absolute difference: about `7.38e-09`;
-- all values finite and stable across three rounds.
+- Ruff, mypy, 52 tests, and compileall passed;
+- two MPS micro storage-step runs were GREEN and bitwise repeatable;
+- the 443,648-parameter tiny MPS storage-step was GREEN;
+- resident-versus-storage loss, gradient norm, and final state differences were zero;
+- storage-versus-restored state was exact;
+- all five interruption points preserved the prior committed manifest;
+- MLX micro and tiny round trips were exact;
+- PyTorch-versus-MLX canonical state was GREEN;
+- no fallback, unsupported operation, non-finite value, allocation failure, or swap growth was detected;
+- the source tree remained clean.
 
-### Final release-quality gate
+Application-level totals included `7,468,738` bytes read and `7,641,680` bytes written, with `60` reused chunks. These values do not represent NAND-level writes.
 
-Version `0.3.3`, commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c`, passed a fresh target-machine verification:
+### Bounded forward CPU gate
 
-- Ruff passed;
-- mypy passed with no issues in 17 source files;
-- pytest passed with 28 tests;
-- compileall passed;
-- doctor detected Apple M2 MPS;
-- all three tiny backend variants passed;
-- state and batch checksums were equal;
-- JSON and `.state.npz` artifacts were valid;
-- no fallback or unsupported operator evidence was reported;
-- the working tree remained clean.
+Version 0.6.0 passed the Python 3.11 and 3.13 pull-request CI matrix:
 
-This evidence validates resident execution and the benchmark contract. It does not validate out-of-core execution.
+- installation;
+- Ruff;
+- mypy;
+- complete pytest suite;
+- compileall;
+- resident CPU smoke;
+- storage lifecycle smoke;
+- bounded-forward CPU smoke;
+- final store verification.
+
+Target MPS validation remains required before the bounded-forward milestone is closed.
 
 ## 12. Competitive engineering policy
 
-MicroColossus must remain competitive by measurement.
+MicroColossus remains competitive by measurement.
 
 Direct Apple Silicon baselines include:
 
 1. resident PyTorch MPS;
-2. PyTorch MPS with activation checkpointing;
-3. native MLX with an equivalent controlled Transformer;
+2. checkpointed PyTorch MPS;
+3. equivalent MLX execution;
 4. compiled MLX when justified;
-5. MLX-LM full-model fine-tuning when semantically comparable;
+5. semantically comparable MLX-LM full-model fine-tuning;
 6. MicroColossus reference execution;
-7. compact and adapter modes, reported separately.
+7. future compact and adapter modes, reported separately.
 
-An apples-to-apples comparison should hold constant:
+An accepted comparison holds constant architecture, unique parameter count, initial arrays, input batches, dtype, optimizer semantics, clipping, sequence length, microbatch, synchronization, machine, and framework versions.
 
-- architecture and unique parameter count;
-- initial parameter arrays and input batches;
-- dtype and optimizer semantics;
-- clipping, sequence length, and microbatch;
-- warm-up and measured update count;
-- synchronization points;
-- machine, power state, macOS, and framework versions.
+Required metrics include numerical distance, latency, throughput, RSS, allocator counters, available memory, pressure, swap, storage reads and writes, estimated endurance, and recovery cost.
 
-Required metrics include:
+An optimization is accepted only when it improves a declared objective without violating correctness, memory, endurance, stability, recovery, or reproducibility.
 
-- numerical distance;
-- first-step and steady-state latency;
-- tokens per second;
-- process RSS;
-- framework and driver allocator counters;
-- available memory, pressure, compression, and swap;
-- storage reads and writes;
-- SSD write amplification;
-- checkpoint and recovery cost.
+## 13. Versioned transaction contract
 
-An optimization is accepted only when it improves a declared objective without violating correctness, memory, endurance, stability, recovery, or reproducibility constraints.
-
-## 13. Tensor manifest and transaction contract
-
-The next implementation uses a backend-neutral logical model.
-
-Each tensor record must identify:
+A tensor record identifies:
 
 ```text
 tensor_id
@@ -309,6 +328,7 @@ logical_name
 kind
 shape
 dtype
+byte_order
 version
 chunk_ids
 byte_length
@@ -316,18 +336,7 @@ checksum
 committed_step
 ```
 
-Initial tensor kinds include:
-
-```text
-parameter
-gradient
-adam_first_moment
-adam_second_moment
-master_weight
-metadata
-```
-
-Each chunk record must identify:
+A chunk record identifies:
 
 ```text
 chunk_id
@@ -339,7 +348,7 @@ compression
 creation_transaction
 ```
 
-Each transaction must identify:
+A transaction identifies:
 
 ```text
 transaction_id
@@ -350,7 +359,7 @@ expected_checksums
 state
 ```
 
-Transaction states begin with:
+Transaction states are:
 
 ```text
 prepared
@@ -360,32 +369,17 @@ committed
 aborted
 ```
 
-A transaction cannot publish a new manifest until every required chunk is durable and checksum-valid.
+A transaction cannot publish a new manifest until all required chunks are durable and checksum-valid. Until publication, the previous committed manifest remains authoritative.
 
-## 14. Storage and recovery requirements
+## 14. Development scale ladder
 
-The tensor store must provide:
+1. **Unit scale**. Bytes, arrays, operators, corruption, and failure injection.
+2. **Micro model**. A sub-million-parameter Transformer for every complete runtime path.
+3. **Small real training**. A few-million-parameter model on a small text corpus with training and validation loss, checkpoint and resume, and sample generation.
+4. **Milestone scale**. Larger runs only after the same path is correct at smaller scales.
+5. **Capacity demonstration**. 124M, 350M, and larger targets after bounded storage-backed training exists.
 
-- immutable or copy-on-write chunks;
-- logical tensor versions;
-- per-chunk checksums;
-- write-ahead journaling;
-- atomic manifest publication;
-- incremental checkpoints;
-- bounded staging buffers;
-- read and write telemetry;
-- failure-injection tests.
-
-A step is committed only after all required chunks and the new manifest are durable. Until then, the previous committed version remains authoritative.
-
-Recovery must distinguish:
-
-- the last committed manifest;
-- complete but unpublished chunks;
-- partial chunk writes;
-- checksum failures;
-- aborted transactions;
-- stale cache entries.
+A future external training project may become the real-training frontend. Storage, scheduling, transactions, and backend interfaces remain independent of it.
 
 ## 15. Roadmap
 
@@ -401,40 +395,32 @@ Status: completed.
 
 Status: completed.
 
-Established:
+### M3. Versioned tensor store
 
-- equivalent PyTorch and MLX workloads;
-- target-hardware correctness and artifact validation;
-- resident performance comparison;
-- dual-backend decision;
-- clean release-quality verification.
+Status: completed.
 
-### M3. Versioned NVMe tensor store
+### M4A. Observable storage-backed optimizer lifecycle
 
-Status: next.
+Status: completed.
 
-- stable tensor, chunk, manifest, and transaction schemas;
-- checksums and copy-on-write versions;
-- write-ahead journal;
-- atomic manifest publication;
-- recovery and failure injection;
-- bounded staging;
-- storage telemetry;
-- PyTorch and MLX export and restore adapters.
+### M4B1. Bounded parameter-group forward
 
-### M4. Synchronous storage-to-accelerator execution
+Status: implemented. Target MPS validation pending.
 
-- authoritative state on NVMe;
-- layer-wise loading into a bounded working set;
-- forward, backward, and optimizer execution;
-- atomic step publication;
-- resident-versus-streamed comparison.
+### M4B2. Bounded backward and streamed optimizer update
 
-### M5. Recomputation and strict budgets
+Next after M4B1 target validation.
 
-- activation checkpoint planning;
-- deterministic recomputation;
-- memory, pressure, storage, write, and time rejection rules.
+The first reference design uses two storage passes:
+
+1. reverse-order backward, store gradients, and accumulate the global squared norm;
+2. calculate the clipping factor, then stream parameters, gradients, and Adam state for atomic update publication.
+
+### M5. Activation recomputation and strict budgets
+
+- deterministic activation recomputation;
+- activation retention, offload, and rejection policies;
+- memory, pressure, storage, write, and time budgets.
 
 ### M6. Asynchronous overlap
 
@@ -450,7 +436,15 @@ Status: next.
 - tiled output projection and loss;
 - normalization and attention paths.
 
-### M8. Constrained-hardware demonstration
+### M8. Small real-corpus training
+
+- tokenizer and deterministic dataset cursor;
+- train and validation loss;
+- checkpoint and resume;
+- periodic sample generation;
+- resident-versus-storage comparison over many steps.
+
+### M9. Constrained-hardware demonstrations
 
 - validate around 124 million parameters;
 - attempt full-parameter training around 350 million parameters on the 8 GB M2 target;
@@ -460,11 +454,11 @@ Scale targets are research goals, not guaranteed outcomes.
 
 ## 16. Success criteria
 
-The first meaningful storage-backed milestone requires:
+The first meaningful out-of-core training demonstration requires:
 
-1. the active working set remains inside configured limits;
-2. the complete state exceeds safe resident capacity;
-3. updates are compared with the resident reference;
+1. the complete managed training state exceeds safe resident capacity;
+2. the active parameter, activation, and workspace set remains inside configured limits;
+3. updates are compared with the resident reference where feasible;
 4. every managed tensor version is traceable;
 5. storage traffic and writes are reported;
 6. interruption recovers the last committed state;
