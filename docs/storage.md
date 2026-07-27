@@ -1,6 +1,6 @@
 # Versioned Tensor Store and Bounded Execution
 
-This document describes the storage foundation introduced in MicroColossus 0.4, the observable storage-backed optimizer lifecycle introduced in 0.5, bounded parameter-group forward execution introduced in 0.6, and bounded backward with versioned gradient storage introduced in 0.7.
+This document describes the storage foundation introduced in MicroColossus 0.4, the observable optimizer lifecycle introduced in 0.5, bounded forward in 0.6, bounded backward and gradient storage in 0.7, and group-bounded AdamW with atomic step-bundle publication in 0.8.
 
 ## Scope
 
@@ -10,9 +10,10 @@ The current implementation has three distinct compute paths:
 
 - `storage-step` validates an entire optimizer lifecycle, but materializes the complete micro model and optimizer;
 - `bounded-forward` materializes one parameter execution group at a time and retains hidden activations;
-- `bounded-backward` recomputes one local group at a time, propagates one activation gradient at a time, and persists final parameter gradients in a separate versioned store.
+- `bounded-backward` recomputes one local group at a time, propagates one activation gradient at a time, and persists final parameter gradients in a separate versioned store;
+- `bounded-step` consumes those gradients, streams one unique parameter and Adam state group at a time, and atomically publishes a complete root step bundle.
 
-The 0.7 path does not update parameters or AdamW state. Those operations remain a separate milestone.
+Version 0.8 still implements one isolated step. Multiple-step scheduling and resume remain separate milestones.
 
 ## Store layout
 
@@ -122,7 +123,8 @@ Every validated interruption leaves the prior committed manifest authoritative.
 Bounded execution adds logical working-set budgets:
 
 - parameter bytes for one execution group;
-- gradient bytes for one backward group.
+- gradient bytes for one backward group;
+- parameter, gradient, first-moment, second-moment, and step bytes for one optimizer group.
 
 A group is rejected before compute when it exceeds its declared budget. These logical limits do not represent total physical memory. RSS, framework allocations, driver allocations, activations, page cache, compression, and operating-system pressure remain separate measurements.
 
@@ -287,6 +289,14 @@ The complete run reports:
 - parameter-manifest immutability;
 - store verification results.
 
+## Bounded AdamW and atomic step bundles
+
+`bounded-step` first executes the validated bounded backward path. It then publishes an initial root bundle that references immutable parameter and zero-initialized AdamW stores. For each unique execution group it reads parameters, final gradients, first moments, second moments, and step tensors; applies the shared clipping coefficient; executes AdamW; writes candidate parameter and optimizer versions; and releases the group.
+
+The tied token embedding appears in both the embedding and final-head execution plans, but it is updated only once because optimizer groups deduplicate parameter names. Candidate child stores may advance while they are built, but the authoritative training state remains the root bundle at step 0 until every candidate store verifies and the step-1 bundle `CURRENT` pointer is replaced atomically.
+
+CPU validation compares all parameters, moments, steps, and optimizer metadata exactly with a resident PyTorch oracle. Complete candidate and oracle states are materialized together only after bounded execution for validation.
+
 ## Development scale ladder
 
 1. **Unit scale**. Bytes, arrays, operators, corruption, and failure injection.
@@ -347,6 +357,19 @@ microcolossus bounded-backward \
   --gradient-working-set-mib 1
 ```
 
+Run one complete bounded optimizer step:
+
+```bash
+microcolossus bounded-step \
+  --config examples/micro-storage.yaml \
+  --bundle-store runs/micro-bounded-step \
+  --output runs/micro-bounded-step.json \
+  --device cpu \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1 \
+  --optimizer-working-set-mib 4
+```
+
 ## Validated target-hardware results
 
 ### Version 0.5
@@ -373,12 +396,16 @@ A clean MacBook Air M2 run with 8 GB unified memory validated commit `1feea9f9ee
 
 Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes.
 
+### Version 0.7
+
+A clean target run validated two bitwise-exact micro bounded-backward executions and one GREEN tiny execution. Loss and tensor-gradient differences were zero, the maximum global-norm difference was approximately `9.57e-08`, tied-gradient versioning and both budget rejections passed, all three stores verified and recovered, swap growth was zero, and the repository remained clean.
+
 ## Current boundary
 
 MicroColossus does not yet establish:
 
-- streamed AdamW updates;
-- atomic publication of a complete bounded optimizer step;
+- multiple consecutive bounded optimizer steps;
+- checkpoint and resume for the bounded runtime;
 - activation recomputation from storage or activation offload;
 - asynchronous prefetch or writeback;
 - intra-layer tiling;
@@ -387,4 +414,4 @@ MicroColossus does not yet establish:
 - real-corpus language-model training;
 - training state larger than safe resident unified memory.
 
-The next milestone after validating bounded backward is a second streamed pass that reads parameter, gradient, and AdamW state group by group, applies global clipping, and atomically publishes a complete updated training state.
+The next hardware gate validates the 0.8 bounded-step path on MPS. After that, development moves to repeated bounded steps, checkpoint/resume, and then activation recomputation or offload.

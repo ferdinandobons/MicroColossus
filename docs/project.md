@@ -237,7 +237,7 @@ The first bounded forward executor retains hidden activations.
 
 ### Bounded backward and gradient storage
 
-Implemented in version 0.7, pending target validation:
+Implemented and validated on the target M2 in version 0.7:
 
 - detached boundary activations retained on CPU;
 - reverse execution-group order;
@@ -252,12 +252,26 @@ Implemented in version 0.7, pending target validation:
 - parameter and gradient working-set budgets;
 - per-group storage, compute, release, checksum, RSS, accelerator, and driver telemetry.
 
-The complete final gradient state is materialized after bounded execution only for validation. AdamW updates are not performed in this phase.
+The complete final gradient state is materialized after bounded execution only for validation.
+
+### Streamed AdamW and atomic step publication
+
+Implemented in version 0.8, pending target validation:
+
+- canonical global clipping coefficient shared by resident and bounded paths;
+- unique parameter-group execution that updates tied weights exactly once;
+- parameter, gradient, first-moment, second-moment, and step-state streaming;
+- candidate parameter and optimizer stores built group by group;
+- exact CPU comparison with a resident PyTorch AdamW oracle;
+- candidate restore and re-export verification;
+- atomic root step-bundle manifest and `CURRENT` pointer;
+- failure injection before root manifest and pointer publication;
+- logical optimizer working-set budget and per-group telemetry.
 
 ### Not implemented
 
-- streamed AdamW parameter and optimizer-state updates;
-- atomic publication of a complete bounded optimizer step;
+- multiple consecutive bounded optimizer steps;
+- checkpoint and resume for the bounded runtime;
 - activation recomputation from storage or activation offload;
 - asynchronous storage overlap;
 - intra-layer tiling;
@@ -303,6 +317,10 @@ Version 0.6.0, commit `1feea9f9eef28e551ad4ae4944614083effa804f`, passed on the 
 - stores verified and recovered;
 - no fallback, unsupported operation, non-finite value, allocation failure, or swap growth was detected;
 - the source tree remained clean.
+
+### Clean target bounded-backward validation
+
+Version 0.7.0, commit `c72dcc2f8d8a7bd783ae263cf14476d0681b664b`, passed on the same target. Two micro bounded-backward runs were GREEN and bitwise exact; the tiny run was GREEN; maximum loss and tensor-gradient differences were zero; maximum norm difference was about `9.57e-08`; tied-gradient accumulation, budget rejection, store recovery, no-fallback checks, and clean source integrity all passed.
 
 ## 12. Competitive engineering policy
 
@@ -415,15 +433,15 @@ Status: completed, including target M2 validation.
 
 ### M4B2. Bounded backward and gradient store
 
-Status: implemented. Target M2 validation pending.
+Status: completed, including target M2 validation.
 
 This phase stores final parameter gradients separately, validates tied-gradient accumulation, and calculates the global gradient norm without changing parameters.
 
 ### M4B3. Streamed AdamW and atomic step publication
 
-Next after M4B2 target validation.
+Status: implemented in version 0.8. Target M2 validation pending.
 
-The reference design will:
+The reference implementation:
 
 1. read each parameter, final gradient, Adam first moment, Adam second moment, and step state group by group;
 2. apply the global clipping coefficient;
