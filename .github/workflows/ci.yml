@@ -29,3 +29,9 @@ jobs:
           microcolossus doctor
           microcolossus plan --config examples/tiny-mps.yaml
           microcolossus train --config examples/tiny-resident.yaml --steps 1 --device cpu
+          microcolossus benchmark \
+            --config examples/tiny-resident.yaml \
+            --backend pytorch \
+            --warmup-steps 0 \
+            --steps 1 \
+            --output /tmp/microcolossus-benchmark.json
