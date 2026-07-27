@@ -1,6 +1,6 @@
 # MicroColossus Validation Ledger
 
-This ledger records accepted executable evidence, corrected failures, tested commits, engineering conclusions, and the exact boundary of every result.
+This ledger records accepted executable evidence, corrected failures, exact tested commits, engineering conclusions, and the boundary of every result.
 
 ## 1. Validation policy
 
@@ -29,19 +29,19 @@ Mandatory distinctions:
 - framework memory counters are not equivalent physical-memory counters;
 - application storage bytes are not NAND-level writes;
 - full-state materialization used only for validation must be declared;
-- full-parameter, compact, and adapter methods are reported separately;
+- full-parameter, compact, quantized, and adapter methods are reported separately;
 - a larger parameter count is not success when correctness, recovery, throughput, or endurance are unacceptable.
 
 ## 2. Accepted evidence summary
 
 | Area | Version or commit | Target result | Main conclusion |
 |---|---|---|---|
-| Resident MPS foundation | `a56fc514f2f8e705654034f3c2f02e3a441c61f3` | PASS on 8 GB M2 | Native MPS forward, backward, AdamW, telemetry, and learning work |
+| Resident MPS foundation | `a56fc514f2f8e705654034f3c2f02e3a441c61f3` | PASS on 8 GB M2 | Native MPS forward, backward, AdamW, telemetry, and fixed-batch learning work |
 | Competitive PyTorch and MLX | `785183a1ff87df0c22df9619d1ab7bf53968bc79`, finalized by 0.3.3 | PASS runtime and clean release verification | MLX was 1.592x faster in the tested resident workload. Dual backend selected |
 | Versioned tensor store and lifecycle | `82e53c671848d231c2361443882b97dbe4e3a408`, 0.5.0 | PASS on 8 GB M2 | Canonical state, recovery, failure injection, PyTorch and MLX round trips work |
 | Bounded forward | `1feea9f9eef28e551ad4ae4944614083effa804f`, 0.6.0 | PASS on 8 GB M2 | One parameter group at a time matched resident boundaries, logits, and loss |
 | Bounded backward | `c72dcc2f8d8a7bd783ae263cf14476d0681b664b`, 0.7.0 | PASS on 8 GB M2 | Reverse group execution produced exact tested gradients and valid gradient stores |
-| Bounded AdamW and root bundles | `ef88198d66f1d1795ffa14dcb6db388ae1715e85`, 0.8.0 | CPU CI PASS. MPS gate pending | One complete group-bounded optimizer update and atomic root publication are implemented |
+| Bounded AdamW and root bundles | `ef88198d66f1d1795ffa14dcb6db388ae1715e85`, 0.8.0 | PASS on 8 GB M2 | One complete group-bounded optimizer step and atomic root publication work on MPS |
 
 ## 3. Resident Apple M2 foundation
 
@@ -84,15 +84,15 @@ MPS bitwise and numerical reproducibility remain separate properties.
 
 ## 4. Competitive PyTorch MPS and MLX validation
 
-### 4.1 First blocked attempt
+### 4.1 Blocked attempt and corrections
 
-Commit `2f7963a5d0af3eabb5a31eab4013f422725c71c0` stopped at the project-check gate because of Ruff import ordering and a NumPy typing-version incompatibility. No backend decision was made from that attempt.
+Commit `2f7963a5d0af3eabb5a31eab4013f422725c71c0` stopped at the project-check gate because of Ruff import ordering and a NumPy typing-version incompatibility. No backend conclusion was accepted from that attempt.
 
 Release 0.3.2 corrected import ordering, constrained NumPy to `>=2.4,<2.5`, added Python 3.11 and 3.13 CI, and added packaging regression checks.
 
 ### 4.2 Competitive target run
 
-The complete runtime benchmark tested:
+The accepted runtime benchmark tested:
 
 ```text
 785183a1ff87df0c22df9619d1ab7bf53968bc79
@@ -110,32 +110,32 @@ Environment:
 
 Runtime result: **PASS**.
 
-The run completed:
+It completed:
 
 - PyTorch MPS;
 - checkpointed PyTorch MPS;
 - MLX;
-- tiny smoke runs;
+- all tiny smoke paths;
 - nine 23,213,056-parameter competitive runs;
 - identical portable initial-state checksums;
 - identical batch checksums;
-- valid final `.state.npz` artifacts;
+- valid final-state artifacts;
 - tensor-level numerical comparisons;
 - clean source-tree checks.
 
 ### 4.3 Competitive workload
 
 ```text
-parameters:        23,213,056
+parameters:          23,213,056
 Transformer blocks: 6
-hidden size:       512
-attention heads:   8
-vocabulary:        8,192
-sequence length:   128
-microbatch:        1
-precision:         FP32
-optimizer:         full-parameter AdamW
-rounds:            3 counterbalanced rounds
+hidden size:         512
+attention heads:     8
+vocabulary:          8,192
+sequence length:     128
+microbatch:          1
+precision:           FP32
+optimizer:           full-parameter AdamW
+rounds:              3 counterbalanced rounds
 ```
 
 ### 4.4 Performance
@@ -171,26 +171,13 @@ Decision: **DUAL BACKEND**.
 
 - MLX is the preferred optimized Apple Silicon execution candidate.
 - PyTorch MPS remains the numerical oracle and recovery or debugging reference.
-- Storage, transaction, and execution-plan formats remain backend-neutral.
+- Storage, transaction, tensor identity, and execution-plan formats remain backend-neutral.
 
-### 4.7 Final 0.3.3 quality verification
+### 4.7 Final 0.3.3 release verification
 
-Commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c` passed:
-
-- Ruff;
-- mypy with no issues in 17 source files;
-- 28 tests;
-- compileall;
-- doctor;
-- PyTorch, checkpointed PyTorch, and MLX tiny smoke runs;
-- artifact and checksum validation;
-- clean source-tree checks.
-
-The tiny results did not materially differ from the prior competitive baseline, so the nine larger rounds were not repeated.
+Commit `b75d2f646da4ca4dce5acdee567a1f17adcc503c` passed Ruff, mypy, 28 tests, compileall, doctor, PyTorch, checkpointed PyTorch, and MLX tiny smoke paths, artifact checks, numerical comparisons, and clean source-tree checks.
 
 ## 5. Versioned tensor store and observable optimizer lifecycle
-
-### 5.1 Implementation scope
 
 MicroColossus 0.4 introduced:
 
@@ -206,7 +193,7 @@ MicroColossus 0.4 introduced:
 
 MicroColossus 0.5 added one fully observed storage-backed micro optimizer lifecycle.
 
-### 5.2 Clean 0.5 target validation
+### 5.1 Clean 0.5 target validation
 
 Tested commit:
 
@@ -216,18 +203,13 @@ Tested commit:
 
 Overall result: **PASS**.
 
-Environment:
+Environment and quality:
 
-- MacBook Air `Mac14,2`;
-- Apple M2;
-- 8 GB unified memory;
+- MacBook Air `Mac14,2`, Apple M2, 8 GB unified memory;
 - native arm64 without Rosetta;
 - PyTorch 2.13.0 with MPS;
 - MLX 0.32.0;
-- fallback disabled.
-
-Project quality:
-
+- fallback disabled;
 - Ruff passed;
 - mypy passed with no issues in 23 source files;
 - 52 tests passed;
@@ -261,18 +243,11 @@ Reported application-level totals:
 - `fsync` time: `0.010095799` seconds;
 - publication time: `0.001221206` seconds.
 
-Memory:
-
-- maximum RSS: `432,472,064` bytes;
-- maximum MPS allocation: `8,709,376` bytes;
-- maximum Metal driver allocation: `28,049,408` bytes;
-- swap delta: zero.
+Maximum RSS was `432,472,064` bytes. Maximum MPS allocation was `8,709,376` bytes. Maximum Metal driver allocation was `28,049,408` bytes. Swap delta was zero.
 
 This result validated storage lifecycle and recovery. It did not validate bounded compute.
 
 ## 6. Bounded parameter-group forward
-
-### 6.1 Implemented path
 
 Version 0.6:
 
@@ -285,7 +260,7 @@ Version 0.6:
 7. compares every group boundary, final logits, and loss;
 8. verifies that the committed parameter manifest remains unchanged.
 
-### 6.2 Clean 0.6 target validation
+### 6.1 Clean 0.6 target validation
 
 Tested commit:
 
@@ -295,49 +270,27 @@ Tested commit:
 
 Overall result: **PASS**.
 
-Project quality:
-
 - Ruff passed;
 - mypy passed with no issues in 24 source files;
 - 56 tests passed;
 - compileall passed;
-- final repository state was clean.
-
-Bounded-forward results:
-
-- micro run 1: GREEN;
-- micro run 2: GREEN;
-- micro repeatability: BITWISE_EXACT;
-- tiny run: GREEN;
-- intentional parameter-budget rejection: passed;
-- micro order: `embedding`, `block-0`, `final-head`;
-- tiny order: `embedding`, `block-0`, `block-1`, `final-head`;
-- micro reads: 13 total, 12 unique, 1 repeated;
-- tiny reads: 21 total, 20 unique, 1 repeated;
-- tied token embedding reloaded exactly once;
-- largest micro group: `33,280` bytes;
-- largest tiny group: `788,480` bytes;
-- budget: `1,048,576` bytes;
-- maximum boundary difference: `0.0`;
-- maximum logits difference: `0.0`;
-- loss difference: `0.0`;
-- parameter manifest unchanged;
+- micro run 1 and run 2 were GREEN;
+- micro repeatability was BITWISE_EXACT;
+- the tiny run was GREEN;
+- intentional parameter-budget rejection passed;
+- tied token embedding was reloaded exactly once;
+- largest micro group was `33,280` bytes;
+- largest tiny group was `788,480` bytes;
+- configured budget was `1,048,576` bytes;
+- maximum boundary, logits, and loss differences were `0.0`;
+- parameter manifests remained unchanged;
 - store verification and recovery passed.
 
-Memory:
-
-- maximum RSS: `322,273,280` bytes;
-- maximum MPS allocation: `1,181,696` bytes;
-- maximum Metal driver allocation: `19,300,352` bytes;
-- swap delta: zero.
-
-No fallback, unsupported operation, non-finite value, allocation failure, or unexpected command failure was detected.
+Maximum RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes. Swap delta was zero.
 
 Hidden boundary activations remained resident. The bounded claim applied to managed parameter residency.
 
 ## 7. Bounded backward and versioned gradients
-
-### 7.1 Implemented path
 
 Version 0.7:
 
@@ -354,7 +307,7 @@ Version 0.7:
 
 The tied token-embedding gradient is published at version 0 and then updated to version 1.
 
-### 7.2 Clean 0.7 target validation
+### 7.1 Clean 0.7 target validation
 
 Tested commit:
 
@@ -364,113 +317,201 @@ c72dcc2f8d8a7bd783ae263cf14476d0681b664b
 
 Overall result: **PASS**.
 
-Project quality:
-
 - Ruff passed;
 - mypy passed with no issues in 25 source files;
 - 62 tests passed with one skip;
 - compileall passed;
+- two micro runs were GREEN and BITWISE_EXACT;
+- the tiny run was GREEN;
+- reverse group order was correct;
+- resident oracle and bootstrap payloads were released before bounded execution;
+- parameter manifest remained immutable;
+- micro and tiny gradient tensor counts were 12 and 20;
+- tied-gradient accumulation count was 2;
+- tied-gradient final version was 1;
+- maximum loss difference was `0.0`;
+- maximum tensor-gradient difference was `0.0`;
+- maximum global-norm difference was about `9.57e-08`;
+- parameter and gradient budget rejection passed;
+- parameter, oracle-gradient, and bounded-gradient stores verified and recovered;
+- swap delta was zero;
+- no fallback, unsupported operation, non-finite value, or unexpected command failure was detected;
 - final repository state was clean.
 
-Bounded-backward results:
+This phase intentionally did not update parameters or AdamW state.
 
-- micro run 1: GREEN;
-- micro run 2: GREEN;
-- repeatability: BITWISE_EXACT;
-- tiny run: GREEN;
-- micro reverse order: `final-head`, `block-0`, `embedding`;
-- tiny reverse order: `final-head`, `block-1`, `block-0`, `embedding`;
-- largest micro parameter and gradient group: `33,280` bytes;
-- largest tiny parameter and gradient group: `788,480` bytes;
-- parameter and gradient budgets: `1,048,576` bytes each;
-- resident oracle released before bounded execution;
-- bootstrap payloads released before bounded execution;
-- parameter manifest remained unchanged;
-- micro gradient count: 12;
-- tiny gradient count: 20;
-- tied-gradient accumulation count: 2;
-- tied-gradient final version: 1;
-- maximum loss difference: `0.0`;
-- maximum tensor-gradient difference: `0.0`;
-- maximum global-norm difference: approximately `9.57e-08`;
-- parameter and gradient budget rejection passed;
-- parameter, oracle-gradient, and bounded-gradient stores verified and recovered.
+## 8. Bounded AdamW and atomic root step bundles
 
-Memory and I/O:
+Version 0.8 consumes the validated final-gradient store and completes one bounded optimizer update.
 
-- total parameter bytes read: `4,027,392`;
-- total logical gradient bytes written: `2,013,696`;
-- maximum RSS: `361,496,576` bytes;
-- maximum MPS allocation: `2,132,480` bytes;
-- maximum Metal driver allocation: `19,644,416` bytes;
-- swap delta: zero.
+The path:
 
-No unexpected fallback, unsupported operation, non-finite value, or command failure was detected.
-
-This result completed the bounded-backward and gradient-store milestone. Parameters and AdamW state were not updated in this phase.
-
-## 8. Version 0.8 bounded optimizer and root bundle
-
-### 8.1 Implemented path
-
-Version 0.8:
-
-1. consumes the validated final-gradient store;
-2. applies a canonical global clipping coefficient;
-3. deduplicates optimizer groups so tied parameters update once;
-4. reads one parameter, gradient, first-moment, second-moment, and step group at a time;
-5. executes reference AdamW;
+1. calculates one canonical global clipping coefficient;
+2. reads one unique parameter group and its final gradients;
+3. reads matching Adam first moments, second moments, and step tensors;
+4. applies AdamW group by group;
+5. updates the tied token embedding exactly once;
 6. writes candidate parameter and optimizer stores;
-7. validates the complete candidate state against a resident oracle;
+7. compares the complete candidate state with a resident PyTorch oracle;
 8. restores and re-exports the candidate state;
-9. publishes a root step bundle only after child stores verify;
-10. preserves the previous root bundle when publication is interrupted.
+9. verifies every child store;
+10. atomically publishes a root step bundle;
+11. preserves the prior bundle when publication is interrupted.
 
-Current main implementation commit:
+### 8.1 CPU CI evidence
+
+The 0.8 implementation passed Python 3.11 and 3.13 CI with:
+
+- Ruff;
+- mypy;
+- pytest;
+- compileall;
+- exact CPU resident-versus-candidate state;
+- exact candidate restore;
+- deterministic repeats;
+- optimizer working-set rejection;
+- bundle checksum validation;
+- failure recovery;
+- CPU bounded-step smoke.
+
+### 8.2 Clean 0.8 target validation
+
+Tested runtime commit:
 
 ```text
 ef88198d66f1d1795ffa14dcb6db388ae1715e85
 ```
 
-### 8.2 Accepted CPU CI evidence
+Package version:
 
-The 0.8 pull-request matrix passed on Python 3.11 and 3.13:
+```text
+0.8.0
+```
 
-- installation;
-- Ruff;
-- mypy;
-- pytest;
-- compileall;
-- bounded-step CPU smoke;
-- exact resident-versus-candidate parameter and optimizer state;
-- exact candidate-versus-restored state;
-- deterministic repeated CPU execution;
-- unique tied-weight update;
-- optimizer working-set rejection;
-- failure before bundle-manifest rename;
-- failure before root `CURRENT` rename;
-- bundle checksum verification.
+Overall result: **PASS**.
 
-### 8.3 Target MPS gate
+Environment:
 
-Target MPS validation is pending.
+- MacBook Air `Mac14,2`;
+- Apple M2 with 8 GPU cores;
+- 8 GB unified memory;
+- native arm64 without Rosetta;
+- Python 3.13.12;
+- PyTorch 2.13.0;
+- MPS built and available;
+- MPS recommended maximum memory reported as `5,726,633,984` bytes;
+- `PYTORCH_ENABLE_MPS_FALLBACK` unset;
+- source tree clean before and after execution.
 
-The target protocol requires:
+Project quality:
 
-- two micro bounded-step runs;
-- one tiny bounded-step run;
-- raw loss, gradient-norm, parameter, and optimizer-state comparison;
-- tied-parameter update count equal to one;
-- candidate tensor versions equal to one;
-- root step transition from 0 to 1;
-- exact candidate restore;
-- optimizer working-set rejection;
-- both bundle failure points preserving step 0;
-- child-store and root-bundle verification and recovery;
-- fallback disabled;
-- clean source tree.
+- Ruff: PASS, all checks passed;
+- mypy: PASS, no issues in 27 source files;
+- pytest: PASS, 72 passed and 1 skipped;
+- compileall: PASS;
+- doctor and both static plans: PASS.
 
-No MPS claim for 0.8 is accepted until that run completes.
+Successful bounded-step runs:
+
+- micro run 1: GREEN;
+- micro run 2: GREEN;
+- micro repeatability: BITWISE_EXACT;
+- 443,648-parameter tiny run: GREEN.
+
+Group order:
+
+```text
+micro: embedding, block-0, final-head
+tiny:  embedding, block-0, block-1, final-head
+```
+
+Working-set evidence:
+
+| Configuration | Maximum parameter group | Maximum gradient group | Maximum optimizer group |
+|---|---:|---:|---:|
+| Micro | 33,280 bytes | 33,280 bytes | 133,152 bytes |
+| Tiny | 788,480 bytes | 788,480 bytes | 3,153,952 bytes |
+
+Configured budgets:
+
+```text
+parameter: 1,048,576 bytes
+gradient:  1,048,576 bytes
+optimizer: 4,194,304 bytes
+```
+
+All successful groups respected their budgets.
+
+Correctness:
+
+- tied parameter update count: `1`;
+- initial bundle step: `0`;
+- final bundle step: `1`;
+- initial bundle remained authoritative until final publication: true;
+- final bundle became authoritative: true;
+- maximum loss difference: `0.0`;
+- maximum gradient-norm difference: `9.567381065167524e-08`;
+- micro clipping coefficient: `0.34425213011375594`;
+- tiny clipping coefficient: `0.3056236470631644`;
+- resident-versus-candidate maximum difference: `0.0`;
+- resident-versus-candidate mean difference: `0.0`;
+- candidate-versus-restored exact bytes: true;
+- all candidate tensor versions: `1`.
+
+State counts:
+
+| Configuration | Candidate parameters | Candidate optimizer tensors | Final gradients |
+|---|---:|---:|---:|
+| Micro | 12 | 37 | 12 |
+| Tiny | 20 | 61 | 20 |
+
+Durability and rejection tests:
+
+- optimizer working-set rejection: PASS;
+- interruption before root bundle-manifest rename: previous step preserved;
+- interruption before root `CURRENT` rename: previous step preserved;
+- root bundle verify and recover: PASS;
+- child parameter, optimizer, and gradient stores verify and recover: PASS.
+
+Application-level totals across the accepted runs:
+
+- parameter bytes read: `1,866,240`;
+- parameter bytes written: `1,866,240`;
+- gradient bytes read: `1,866,240`;
+- optimizer bytes read: `3,732,656`;
+- optimizer bytes written: `3,734,460`;
+- publication `fsync` total: `0.0022067919926485047` seconds;
+- rename and publication total: `0.0010027890239143744` seconds.
+
+Observed resources:
+
+- maximum RSS: `393,052,160` bytes;
+- maximum MPS current allocation reported by the sampled optimizer telemetry: `0` bytes;
+- maximum Metal driver allocation: `25,935,872` bytes;
+- swap delta: `8,388,608` bytes.
+
+The zero sampled MPS allocation value is recorded as reported. It is not interpreted as evidence that the MPS path did not execute. The device, MPS preflight, driver allocation, and successful MPS computation were independently recorded.
+
+No hidden fallback, unsupported operator, non-finite value, allocation failure, or unexpected command failure was detected. The first external diagnostic scan produced a false positive and was corrected outside the repository. Project source was not modified.
+
+### 8.3 Accepted conclusion
+
+M4B3 is complete for the tested PyTorch MPS reference path.
+
+The accepted evidence establishes one complete bounded optimizer step containing:
+
+```text
+bounded forward
+    -> bounded backward
+    -> versioned gradient store
+    -> streamed global clipping
+    -> group-bounded AdamW
+    -> candidate parameter and optimizer stores
+    -> exact restore validation
+    -> atomic root step publication
+```
+
+It does not establish consecutive training steps or larger-than-memory training.
 
 ## 9. Milestone status
 
@@ -481,26 +522,24 @@ No MPS claim for 0.8 is accepted until that run completes.
 | M2. Competitive Apple Silicon baseline | Completed |
 | M3. Versioned tensor store | Completed |
 | M4A. Observable storage-backed optimizer lifecycle | Completed |
-| M4B1. Bounded parameter-group forward | Completed, including target M2 validation |
-| M4B2. Bounded backward and gradient store | Completed, including target M2 validation |
-| M4B3. Streamed AdamW and atomic step publication | Implemented. Target MPS validation pending |
-| M4C. Consecutive bounded steps, checkpoint, and resume | Not started |
-| M5. Activation recomputation, offload, and strict total budgets | Not started |
-| M6. Asynchronous prefetch and writeback | Not started |
-| M7. Intra-layer tiling | Not started |
-| M8. Real-corpus training frontend | Not started |
-| M9. 124M and 350M capacity demonstrations | Not started |
+| M4B1. Bounded parameter-group forward | Completed and validated on M2 |
+| M4B2. Bounded backward and gradient store | Completed and validated on M2 |
+| M4B3. Streamed AdamW and atomic step publication | Completed and validated on M2 |
+| M4C. Consecutive bounded steps, checkpoint, and resume | Next milestone |
+| Activation recomputation and strict runtime budgets | Not started |
+| Asynchronous prefetch and writeback | Not started |
+| Intra-layer tiling | Not started |
+| Real-corpus training frontend | Not started |
+| 124M and 350M capacity demonstrations | Not started |
 
 ## 10. Current evidence boundary
 
 The accepted evidence does not establish:
 
 - multiple consecutive bounded optimizer steps;
-- checkpoint and resume for the bounded runtime;
-- dataset cursor or RNG recovery across process restart;
-- activation recomputation from storage;
-- activation offload;
-- strict total-memory-pressure enforcement;
+- checkpoint and resume across a process restart;
+- deterministic dataset cursor restoration;
+- activation recomputation from storage or activation offload;
 - asynchronous storage overlap;
 - intra-layer tiling;
 - bounded MLX backward or optimizer execution;
@@ -508,15 +547,21 @@ The accepted evidence does not establish:
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target machine.
 
-## 11. Next accepted gate after 0.8 MPS
+## 11. Next engineering gate
 
-After a clean 0.8 MPS PASS, the next required evidence is a persistent multi-step run:
+The next milestone is M4C, tracked in GitHub issue #13.
 
-1. step N+1 starts from the authoritative bundle N;
-2. parameter and Adam state continue across steps;
-3. optimizer step tensors increment correctly;
-4. batch cursor and RNG state are persisted;
-5. process exit and resume reproduce uninterrupted execution;
-6. interruption during a later step preserves the prior root bundle;
-7. storage growth, chunk reuse, stale-version retention, and garbage collection are measured;
-8. loss remains finite over many steps.
+It must:
+
+1. initialize step 0 only once;
+2. consume the current authoritative bundle for every later step;
+3. advance root bundle lineage from step N to step N+1;
+4. persist deterministic batch cursor and configuration provenance;
+5. preserve Adam moments and optimizer step tensors across updates;
+6. reopen in a new process and resume from the current bundle;
+7. match an uninterrupted bounded run;
+8. match a resident PyTorch reference over the same batch sequence;
+9. preserve the previous step after an interrupted later publication;
+10. report per-step numerical, memory, storage, write, and recovery telemetry.
+
+The first target gate will use short micro and tiny runs. Real text data and larger capacity demonstrations remain later milestones.
