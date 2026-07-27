@@ -62,3 +62,10 @@ jobs:
             --output /tmp/microcolossus-storage-step.json \
             --device cpu
           microcolossus store-verify --path /tmp/microcolossus-storage-step-store
+          microcolossus bounded-forward \
+            --config examples/micro-storage.yaml \
+            --store /tmp/microcolossus-bounded-forward-store \
+            --output /tmp/microcolossus-bounded-forward.json \
+            --device cpu \
+            --parameter-working-set-mib 1
+          microcolossus store-verify --path /tmp/microcolossus-bounded-forward-store
