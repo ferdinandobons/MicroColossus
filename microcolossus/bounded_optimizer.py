@@ -36,11 +36,12 @@ from .storage_training import StateComparison, compare_states
 from .telemetry import (
     AcceleratorMemoryMetrics,
     accelerator_memory_metrics,
+    model_checksum,
     process_rss_bytes,
     synchronize_accelerator,
     write_json_atomic,
 )
-from .training import make_synthetic_lm_batch, resolve_device, run_resident_step, seed_everything
+from .training import make_synthetic_lm_batch, resolve_device, seed_everything
 
 BOUNDED_OPTIMIZER_SCHEMA_VERSION = "microcolossus.bounded-optimizer.v1"
 
@@ -186,6 +187,7 @@ def _initialize_adamw_payloads(config: ExperimentConfig) -> tuple[TensorPayload,
         model.parameters(),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
+        foreach=False,
     )
     for parameter in model.parameters():
         state = optimizer.state[parameter]
@@ -287,6 +289,9 @@ def _resident_oracle(
     input_ids: Tensor,
     targets: Tensor,
     device: torch.device,
+    *,
+    clipping_coefficient: float,
+    resident_gradient_norm: float,
 ) -> ResidentOptimizerTrace:
     model = DecoderOnlyTransformer(config.model).to(device)
     restore_pytorch_model(
@@ -303,16 +308,22 @@ def _resident_oracle(
         model.parameters(),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
+        foreach=False,
     )
-    metrics = run_resident_step(
-        model=model,
-        optimizer=optimizer,
-        input_ids=input_ids,
-        targets=targets,
-        device=device,
-        step=0,
-        gradient_clip_norm=config.training.gradient_clip_norm,
-    )
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    output = model(input_ids.to(device), targets.to(device))
+    if output.loss is None:
+        raise RuntimeError("resident oracle did not return a loss")
+    output.loss.backward()
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            parameter.grad.mul_(clipping_coefficient)
+    synchronize_accelerator(device)
+    optimizer.step()
+    synchronize_accelerator(device)
+    loss = float(output.loss.detach().cpu().item())
+    parameter_checksum = model_checksum(model)
     state_payloads = export_pytorch_state(model, optimizer)
     oracle_store = VersionedTensorStore.create(
         oracle_store_path,
@@ -321,16 +332,15 @@ def _resident_oracle(
     transaction = oracle_store.begin_transaction(committed_step=1)
     transaction.put_many(state_payloads)
     commit = transaction.commit()
-    del state_payloads, optimizer, model
+    del state_payloads, output, optimizer, model
     gc.collect()
     synchronize_accelerator(device)
     return ResidentOptimizerTrace(
-        loss=metrics.loss,
-        gradient_norm=metrics.gradient_norm,
-        parameter_checksum=metrics.parameter_checksum,
+        loss=loss,
+        gradient_norm=resident_gradient_norm,
+        parameter_checksum=parameter_checksum,
         store_commit=commit.telemetry,
     )
-
 
 def _apply_adamw_group(
     *,
@@ -366,6 +376,7 @@ def _apply_adamw_group(
         parameters,
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
+        foreach=False,
     )
     for logical_name, parameter in zip(names, parameters, strict=True):
         bare_name = _bare_parameter_name(logical_name)
@@ -491,6 +502,8 @@ def run_bounded_optimizer_step(
         input_ids,
         targets,
         device,
+        clipping_coefficient=backward.future_clip_coefficient,
+        resident_gradient_norm=backward.resident_gradient_norm,
     )
     del initial_optimizer_payloads
     gc.collect()
@@ -673,6 +686,7 @@ def run_bounded_optimizer_step(
         restored_model.parameters(),
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
+        foreach=False,
     )
     restore_pytorch_state(restored_model, candidate_state, optimizer=restored_optimizer)
     restored_state = export_pytorch_state(restored_model, restored_optimizer)
