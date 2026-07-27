@@ -670,6 +670,8 @@ class StoreTransaction:
             written_chunk_ids=tuple(self._written_chunk_ids),
             message=message,
         )
+        self._payloads.clear()
+        self._explicit_versions.clear()
 
     def _inject(self, point: FailurePoint, **context: Any) -> None:
         if self.failure_injector is not None:
@@ -933,6 +935,8 @@ class StoreTransaction:
             telemetry,
             counted_writes=physical_chunk_bytes + metadata_bytes_written,
         )
+        self._payloads.clear()
+        self._explicit_versions.clear()
         return CommitResult(manifest=candidate, telemetry=telemetry)
 
 
