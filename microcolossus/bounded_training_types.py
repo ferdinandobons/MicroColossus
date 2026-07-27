@@ -1,0 +1,102 @@
+"""Result types for persistent bounded training."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from .bounded_optimizer import OptimizerGroupMetrics
+from .step_bundle import (
+    BundlePublicationTelemetry,
+    BundleVerificationReport,
+)
+from .storage_training import StateComparison
+from .training_checkpoint import BundleLineageEntry, TrainingMetadata
+
+
+@dataclass(frozen=True)
+class PersistentStepResult:
+    step: int
+    batch_cursor: int
+    batch_seed: int
+    batch_checksum: str
+    source_bundle_id: str
+    final_bundle_id: str
+    source_parameter_store_path: str
+    source_optimizer_store_path: str
+    gradient_store_path: str
+    candidate_parameter_store_path: str
+    candidate_optimizer_store_path: str
+    oracle_state_store_path: str
+    bounded_backward_result_path: str
+    parameter_working_set_budget_bytes: int
+    gradient_working_set_budget_bytes: int
+    optimizer_working_set_budget_bytes: int
+    maximum_parameter_group_bytes: int
+    maximum_gradient_group_bytes: int
+    maximum_optimizer_group_bytes: int
+    parameter_budget_respected: bool
+    gradient_budget_respected: bool
+    optimizer_budget_respected: bool
+    resident_loss: float
+    bounded_loss: float
+    loss_absolute_difference: float
+    resident_gradient_norm: float
+    bounded_gradient_norm: float
+    gradient_norm_absolute_difference: float
+    clipping_coefficient: float
+    optimizer_group_order: tuple[str, ...]
+    optimizer_groups: tuple[OptimizerGroupMetrics, ...]
+    tied_parameter_update_count: int
+    candidate_tensor_versions: tuple[tuple[str, int], ...]
+    resident_vs_candidate_state: StateComparison
+    candidate_vs_restored_state: StateComparison
+    source_bundle_remained_authoritative_until_final_publish: bool
+    final_bundle_is_authoritative: bool
+    final_bundle_publication: BundlePublicationTelemetry
+    final_bundle_verification: BundleVerificationReport
+    total_parameter_logical_bytes_read: int
+    total_gradient_logical_bytes_read: int
+    total_optimizer_logical_bytes_read: int
+    total_parameter_logical_bytes_written: int
+    total_parameter_physical_bytes_written: int
+    total_optimizer_logical_bytes_written: int
+    total_optimizer_physical_bytes_written: int
+    full_candidate_state_materialized_for_validation: bool = True
+    resident_oracle_materialized_for_validation: bool = True
+
+
+@dataclass(frozen=True)
+class BoundedTrainingResult:
+    schema_version: str
+    experiment: str
+    device: str
+    bundle_store_path: str
+    training_metadata: TrainingMetadata
+    requested_target_step: int
+    started_step: int
+    final_step: int
+    resumed: bool
+    initialized_bundle_id: str
+    initialization_publication: BundlePublicationTelemetry | None
+    steps: tuple[PersistentStepResult, ...]
+    lineage: tuple[BundleLineageEntry, ...]
+    final_bundle_verification: BundleVerificationReport
+    final_bounded_vs_resident_state: StateComparison
+    final_bundle_vs_restored_state: StateComparison
+    final_batch_cursor: int
+    optimizer_step_values: tuple[tuple[str, float], ...]
+    total_parameter_logical_bytes_read: int
+    total_gradient_logical_bytes_read: int
+    total_optimizer_logical_bytes_read: int
+    total_parameter_logical_bytes_written: int
+    total_parameter_physical_bytes_written: int
+    total_optimizer_logical_bytes_written: int
+    total_optimizer_physical_bytes_written: int
+    batch_cursor_derived_from_committed_step: bool = True
+    full_final_state_materialized_for_validation: bool = True
+    resident_reference_replayed_from_step_zero: bool = True
+    historical_bundles_retained: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
