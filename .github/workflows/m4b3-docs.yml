@@ -1,0 +1,146 @@
+name: Prepare M4B3 documentation
+
+on:
+  push:
+    branches: [agent/m4b3-streamed-adamw]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m4b3-streamed-adamw
+      - name: Update milestone documentation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path: Path, old: str, new: str) -> None:
+              text = path.read_text()
+              if old not in text:
+                  raise SystemExit(f"documentation target not found in {path}: {old[:80]!r}")
+              path.write_text(text.replace(old, new, 1))
+
+          readme = Path("README.md")
+          replace(
+              readme,
+              "The project does not yet claim full out-of-core training. It has validated resident execution, recoverable storage-backed state, a complete observable micro optimizer lifecycle, and bounded parameter-group forward execution. Version 0.7 adds bounded backward propagation and versioned gradient storage for target-hardware validation.",
+              "The project does not yet claim full out-of-core training. Resident execution, recoverable storage-backed state, bounded forward, and bounded backward are validated on the target M2. Version 0.8 adds one complete group-bounded AdamW update with atomic step-bundle publication for target-hardware validation.",
+          )
+          replace(
+              readme,
+              "The complete final gradient state is materialized only after bounded execution for validation. AdamW updates are intentionally deferred to the next milestone.\n\n## Validated Apple M2 evidence",
+              "The complete final gradient state is materialized only after bounded execution for validation.\n\n### Bounded AdamW and atomic step publication\n\nVersion 0.8 adds one complete optimizer update:\n\n- consume the validated final-gradient store;\n- apply one canonical global clipping coefficient;\n- read one unique parameter group, matching gradients, and Adam first and second moments at a time;\n- update tied token embeddings exactly once;\n- build candidate parameter and optimizer stores group by group;\n- compare the complete candidate state with a resident PyTorch oracle;\n- restore and re-export the candidate state for exact validation;\n- publish a root step-bundle manifest only after every candidate store verifies;\n- preserve the previous bundle when publication is interrupted before the root `CURRENT` replacement.\n\nThe complete candidate and oracle states are materialized together only after bounded execution for validation. Multiple consecutive bounded steps are not yet implemented.\n\n## Validated Apple M2 evidence",
+          )
+          replace(
+              readme,
+              "Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes. These counters are not summed as physical-memory equivalents.\n\nThe earlier resident 23,213,056-parameter benchmark produced:",
+              "Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes. These counters are not summed as physical-memory equivalents.\n\nA clean version 0.7.0 run at commit `c72dcc2f8d8a7bd783ae263cf14476d0681b664b` then validated bounded backward on the same target:\n\n- Ruff, mypy, 62 tests with one skip, and compileall passed;\n- two micro runs were GREEN and bitwise exact;\n- the 443,648-parameter tiny run was GREEN;\n- reverse group order, oracle release, parameter-manifest immutability, tied-gradient versioning, and both working-set rejections passed;\n- maximum loss and tensor-gradient differences were zero;\n- maximum global-norm difference was about `9.57e-08`;\n- parameter, oracle-gradient, and bounded-gradient stores verified and recovered;\n- swap growth was zero and no fallback or unsupported operation was detected;\n- the repository remained clean.\n\nThe earlier resident 23,213,056-parameter benchmark produced:",
+          )
+          replace(
+              readme,
+              "```\n\n## Not yet implemented\n\n- streamed AdamW parameter and optimizer-state updates;\n- atomic publication of a complete bounded optimizer step;",
+              "```\n\nOne complete bounded AdamW step:\n\n```bash\nmicrocolossus bounded-step \\\n  --config examples/micro-storage.yaml \\\n  --bundle-store runs/micro-bounded-step \\\n  --output runs/micro-bounded-step.json \\\n  --device cpu \\\n  --parameter-working-set-mib 1 \\\n  --gradient-working-set-mib 1 \\\n  --optimizer-working-set-mib 4\n```\n\n## Not yet implemented\n\n- multiple consecutive bounded steps, checkpoint, and resume;",
+          )
+
+          validation = Path("docs/validation.md")
+          replace(
+              validation,
+              "This phase intentionally does not update parameters or AdamW state. A later streamed optimizer phase will consume the validated gradient store.\n\n## Milestone status",
+              "This phase intentionally does not update parameters or AdamW state.\n\n## Clean 0.7 target bounded-backward validation\n\nCommit `c72dcc2f8d8a7bd783ae263cf14476d0681b664b` passed on a clean MacBook Air M2 with 8 GB unified memory. Ruff, mypy, 62 tests with one skip, compileall, two GREEN micro runs, one GREEN tiny run, repeatability, parameter and gradient budget rejection, three-store verification and recovery, tied-gradient versioning, and clean source-state checks all passed. Maximum loss and tensor-gradient differences were zero. Maximum global-norm difference was approximately `9.57e-08`. No swap growth, fallback, unsupported operation, or non-finite value was detected.\n\n## Version 0.8 bounded optimizer implementation\n\nVersion 0.8 consumes the validated gradient store, applies the canonical clipping coefficient, streams unique parameter groups with matching Adam state, writes candidate parameter and optimizer stores, validates the complete result against a resident oracle, and publishes one atomic root step bundle. CPU CI requires exact state and failure recovery before target MPS validation.\n\n## Milestone status",
+          )
+          replace(
+              validation,
+              "| M4B2. Bounded backward and gradient store | Implemented, target validation pending |\n| M4B3. Streamed AdamW and atomic step publication | Not started |",
+              "| M4B2. Bounded backward and gradient store | Completed, including target M2 validation |\n| M4B3. Streamed AdamW and atomic step publication | Implemented, target validation pending |",
+          )
+          replace(
+              validation,
+              "- bounded AdamW execution;\n- atomic publication of a complete bounded optimizer step;",
+              "- multiple consecutive bounded optimizer steps;\n- checkpoint and resume for the bounded runtime;",
+          )
+          replace(
+              validation,
+              "The next hardware gate is the micro and tiny MPS validation of bounded backward and the gradient store. After that, development moves to a second streamed pass for global clipping, AdamW state, parameter updates, and atomic publication.",
+              "The next hardware gate is the micro and tiny MPS validation of version 0.8: clipping, group-bounded AdamW, candidate-state equivalence, bundle failure recovery, optimizer working-set rejection, and atomic root publication.",
+          )
+
+          project = Path("docs/project.md")
+          replace(
+              project,
+              "Implemented in version 0.7, pending target validation:",
+              "Implemented and validated on the target M2 in version 0.7:",
+          )
+          replace(
+              project,
+              "The complete final gradient state is materialized after bounded execution only for validation. AdamW updates are not performed in this phase.\n\n### Not implemented",
+              "The complete final gradient state is materialized after bounded execution only for validation.\n\n### Streamed AdamW and atomic step publication\n\nImplemented in version 0.8, pending target validation:\n\n- canonical global clipping coefficient shared by resident and bounded paths;\n- unique parameter-group execution that updates tied weights exactly once;\n- parameter, gradient, first-moment, second-moment, and step-state streaming;\n- candidate parameter and optimizer stores built group by group;\n- exact CPU comparison with a resident PyTorch AdamW oracle;\n- candidate restore and re-export verification;\n- atomic root step-bundle manifest and `CURRENT` pointer;\n- failure injection before root manifest and pointer publication;\n- logical optimizer working-set budget and per-group telemetry.\n\n### Not implemented",
+          )
+          replace(
+              project,
+              "- streamed AdamW parameter and optimizer-state updates;\n- atomic publication of a complete bounded optimizer step;",
+              "- multiple consecutive bounded optimizer steps;\n- checkpoint and resume for the bounded runtime;",
+          )
+          replace(
+              project,
+              "- the source tree remained clean.\n\n## 12. Competitive engineering policy",
+              "- the source tree remained clean.\n\n### Clean target bounded-backward validation\n\nVersion 0.7.0, commit `c72dcc2f8d8a7bd783ae263cf14476d0681b664b`, passed on the same target. Two micro bounded-backward runs were GREEN and bitwise exact; the tiny run was GREEN; maximum loss and tensor-gradient differences were zero; maximum norm difference was about `9.57e-08`; tied-gradient accumulation, budget rejection, store recovery, no-fallback checks, and clean source integrity all passed.\n\n## 12. Competitive engineering policy",
+          )
+          replace(
+              project,
+              "Status: implemented. Target M2 validation pending.\n\nThis phase stores final parameter gradients separately, validates tied-gradient accumulation, and calculates the global gradient norm without changing parameters.\n\n### M4B3. Streamed AdamW and atomic step publication\n\nNext after M4B2 target validation.\n\nThe reference design will:",
+              "Status: completed, including target M2 validation.\n\nThis phase stores final parameter gradients separately, validates tied-gradient accumulation, and calculates the global gradient norm without changing parameters.\n\n### M4B3. Streamed AdamW and atomic step publication\n\nStatus: implemented in version 0.8. Target M2 validation pending.\n\nThe reference implementation:",
+          )
+
+          storage = Path("docs/storage.md")
+          replace(
+              storage,
+              "This document describes the storage foundation introduced in MicroColossus 0.4, the observable storage-backed optimizer lifecycle introduced in 0.5, bounded parameter-group forward execution introduced in 0.6, and bounded backward with versioned gradient storage introduced in 0.7.",
+              "This document describes the storage foundation introduced in MicroColossus 0.4, the observable optimizer lifecycle introduced in 0.5, bounded forward in 0.6, bounded backward and gradient storage in 0.7, and group-bounded AdamW with atomic step-bundle publication in 0.8.",
+          )
+          replace(
+              storage,
+              "- `bounded-backward` recomputes one local group at a time, propagates one activation gradient at a time, and persists final parameter gradients in a separate versioned store.\n\nThe 0.7 path does not update parameters or AdamW state. Those operations remain a separate milestone.",
+              "- `bounded-backward` recomputes one local group at a time, propagates one activation gradient at a time, and persists final parameter gradients in a separate versioned store;\n- `bounded-step` consumes those gradients, streams one unique parameter and Adam state group at a time, and atomically publishes a complete root step bundle.\n\nVersion 0.8 still implements one isolated step. Multiple-step scheduling and resume remain separate milestones.",
+          )
+          replace(
+              storage,
+              "- gradient bytes for one backward group.",
+              "- gradient bytes for one backward group;\n- parameter, gradient, first-moment, second-moment, and step bytes for one optimizer group.",
+          )
+          replace(
+              storage,
+              "- store verification results.\n\n## Development scale ladder",
+              "- store verification results.\n\n## Bounded AdamW and atomic step bundles\n\n`bounded-step` first executes the validated bounded backward path. It then publishes an initial root bundle that references immutable parameter and zero-initialized AdamW stores. For each unique execution group it reads parameters, final gradients, first moments, second moments, and step tensors; applies the shared clipping coefficient; executes AdamW; writes candidate parameter and optimizer versions; and releases the group.\n\nThe tied token embedding appears in both the embedding and final-head execution plans, but it is updated only once because optimizer groups deduplicate parameter names. Candidate child stores may advance while they are built, but the authoritative training state remains the root bundle at step 0 until every candidate store verifies and the step-1 bundle `CURRENT` pointer is replaced atomically.\n\nCPU validation compares all parameters, moments, steps, and optimizer metadata exactly with a resident PyTorch oracle. Complete candidate and oracle states are materialized together only after bounded execution for validation.\n\n## Development scale ladder",
+          )
+          replace(
+              storage,
+              "```\n\n## Validated target-hardware results",
+              "```\n\nRun one complete bounded optimizer step:\n\n```bash\nmicrocolossus bounded-step \\\n  --config examples/micro-storage.yaml \\\n  --bundle-store runs/micro-bounded-step \\\n  --output runs/micro-bounded-step.json \\\n  --device cpu \\\n  --parameter-working-set-mib 1 \\\n  --gradient-working-set-mib 1 \\\n  --optimizer-working-set-mib 4\n```\n\n## Validated target-hardware results",
+          )
+          replace(
+              storage,
+              "Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes.\n\n## Current boundary",
+              "Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes.\n\n### Version 0.7\n\nA clean target run validated two bitwise-exact micro bounded-backward executions and one GREEN tiny execution. Loss and tensor-gradient differences were zero, the maximum global-norm difference was approximately `9.57e-08`, tied-gradient versioning and both budget rejections passed, all three stores verified and recovered, swap growth was zero, and the repository remained clean.\n\n## Current boundary",
+          )
+          replace(
+              storage,
+              "- streamed AdamW updates;\n- atomic publication of a complete bounded optimizer step;",
+              "- multiple consecutive bounded optimizer steps;\n- checkpoint and resume for the bounded runtime;",
+          )
+          replace(
+              storage,
+              "The next milestone after validating bounded backward is a second streamed pass that reads parameter, gradient, and AdamW state group by group, applies global clipping, and atomically publishes a complete updated training state.",
+              "The next hardware gate validates the 0.8 bounded-step path on MPS. After that, development moves to repeated bounded steps, checkpoint/resume, and then activation recomputation or offload.",
+          )
+          PY
+          git rm .github/workflows/m4b3-docs.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/project.md docs/storage.md docs/validation.md
+          git commit -m "Document bounded backward validation and atomic AdamW step"
+          git push origin HEAD:agent/m4b3-streamed-adamw
