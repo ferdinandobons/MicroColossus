@@ -69,3 +69,18 @@ jobs:
             --device cpu \
             --parameter-working-set-mib 1
           microcolossus store-verify --path /tmp/microcolossus-bounded-forward-store
+          microcolossus bounded-backward \
+            --config examples/micro-storage.yaml \
+            --parameter-store /tmp/microcolossus-bounded-backward-parameters \
+            --oracle-gradient-store /tmp/microcolossus-bounded-backward-oracle-gradients \
+            --gradient-store /tmp/microcolossus-bounded-backward-gradients \
+            --output /tmp/microcolossus-bounded-backward.json \
+            --device cpu \
+            --parameter-working-set-mib 1 \
+            --gradient-working-set-mib 1
+          microcolossus store-verify \
+            --path /tmp/microcolossus-bounded-backward-parameters
+          microcolossus store-verify \
+            --path /tmp/microcolossus-bounded-backward-oracle-gradients
+          microcolossus store-verify \
+            --path /tmp/microcolossus-bounded-backward-gradients

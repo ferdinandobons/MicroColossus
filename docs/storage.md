@@ -1,12 +1,18 @@
 # Versioned Tensor Store and Bounded Execution
 
-This document describes the storage foundation introduced in MicroColossus 0.4, the observable storage-backed optimizer lifecycle introduced in 0.5, and the first bounded parameter-group forward executor introduced in 0.6.
+This document describes the storage foundation introduced in MicroColossus 0.4, the observable storage-backed optimizer lifecycle introduced in 0.5, bounded parameter-group forward execution introduced in 0.6, and bounded backward with versioned gradient storage introduced in 0.7.
 
 ## Scope
 
-The tensor store keeps canonical model and optimizer state outside framework-owned memory. Its internal representation does not depend on `torch.Tensor` or `mlx.core.array`.
+The tensor store keeps canonical training state outside framework-owned memory. Its internal representation does not depend on `torch.Tensor` or `mlx.core.array`.
 
-The 0.5 optimizer lifecycle still materializes the complete micro model and optimizer for compute. The 0.6 bounded forward path instead materializes one declared parameter execution group at a time. It retains hidden activations and does not yet implement bounded backward or optimizer execution.
+The current implementation has three distinct compute paths:
+
+- `storage-step` validates an entire optimizer lifecycle, but materializes the complete micro model and optimizer;
+- `bounded-forward` materializes one parameter execution group at a time and retains hidden activations;
+- `bounded-backward` recomputes one local group at a time, propagates one activation gradient at a time, and persists final parameter gradients in a separate versioned store.
+
+The 0.7 path does not update parameters or AdamW state. Those operations remain a separate milestone.
 
 ## Store layout
 
@@ -113,11 +119,14 @@ Every validated interruption leaves the prior committed manifest authoritative.
 - maximum managed storage content;
 - maximum internal staging buffer.
 
-The bounded forward command adds a separate logical parameter working-set budget. An execution group is rejected before compute when its referenced parameter bytes exceed that budget.
+Bounded execution adds logical working-set budgets:
 
-The current budget is a logical managed-parameter limit. It is not a claim that process RSS, framework allocation, driver allocation, activations, and operating-system pressure are all captured by one number.
+- parameter bytes for one execution group;
+- gradient bytes for one backward group.
 
-## Telemetry
+A group is rejected before compute when it exceeds its declared budget. These logical limits do not represent total physical memory. RSS, framework allocations, driver allocations, activations, page cache, compression, and operating-system pressure remain separate measurements.
+
+## Store telemetry
 
 Store operations report:
 
@@ -130,29 +139,6 @@ Store operations report:
 - recovery time and actions;
 - current store size;
 - cumulative managed-state bytes written.
-
-The observable optimizer lifecycle also reports:
-
-- state-read and materialization time;
-- forward, backward, clipping, and optimizer time;
-- state-export time;
-- loss and global gradient norm;
-- process RSS and accelerator samples;
-- canonical state digests and tensor versions;
-- numerical distance from the resident oracle.
-
-The bounded forward executor reports for every group:
-
-- group ordinal and logical tensor names;
-- tensor and referenced-chunk count;
-- logical parameter bytes;
-- read, materialization, compute, and release time;
-- input and output activation bytes;
-- activation checksum;
-- numerical distance from the matching resident boundary;
-- process RSS;
-- accelerator allocation after materialization, compute, and release;
-- Metal driver allocation when available.
 
 Filesystem metadata, APFS copy-on-write behavior, controller behavior, and NAND-level writes are not inferred from application counters.
 
@@ -168,9 +154,9 @@ The PyTorch adapter exports and restores:
 
 The MLX adapter exports and restores flattened model and optimizer trees through canonical NumPy-compatible arrays.
 
-The store and manifest format remain independent of both frameworks.
+Storage records and manifests remain independent of both frameworks.
 
-## Observable storage-backed optimizer step
+## Observable storage-backed optimizer lifecycle
 
 `storage-step` performs:
 
@@ -185,11 +171,11 @@ The store and manifest format remain independent of both frameworks.
 9. restoration of the committed update;
 10. exact comparison with the state that was published.
 
-CPU validation requires exact bytes. MPS validation reports both bitwise equality and tensor-level numerical distance.
+CPU validation requires exact bytes. MPS validation reports bitwise equality and tensor-level numerical distance separately.
 
 ## Bounded parameter-group forward
 
-`bounded-forward` creates a parameter-only store, releases the bootstrap and resident models, and executes this plan:
+`bounded-forward` creates a parameter-only store, releases the bootstrap and resident models, and executes:
 
 ```text
 embedding weights
@@ -210,6 +196,96 @@ When token embedding and output projection weights are tied, the token embedding
 The resident oracle records the embedding output, every block output, final logits, and loss. The bounded executor compares every corresponding boundary.
 
 The first implementation retains hidden activations between groups. Its bounded claim applies to managed parameter residency only.
+
+## Bounded backward and the gradient store
+
+`bounded-backward` isolates reverse-mode differentiation from optimizer execution.
+
+### Forward preparation
+
+The executor first performs the same parameter-group forward path. It stores detached group-boundary activations in CPU memory. The parameter manifest remains immutable.
+
+### Reverse execution
+
+Groups are processed in reverse order:
+
+```text
+final normalization and output projection
+  read parameters
+  materialize saved input activation
+  recompute local output
+  backward from cross-entropy
+  extract parameter gradients and upstream activation gradient
+  commit gradients
+  release
+
+Transformer block N
+  read parameters
+  materialize saved input and incoming gradient
+  recompute local output
+  backward
+  extract gradients and next upstream gradient
+  commit gradients
+  release
+
+embedding weights
+  read parameters
+  recompute embedding output
+  backward with incoming gradient
+  commit embedding gradients
+  release
+```
+
+Only one parameter group, one local activation, and one incoming activation gradient are intended to be accelerator-resident during each backward group.
+
+### Separate versioned gradient state
+
+Resident-oracle gradients are first written to a dedicated versioned store. The resident gradient payloads and bootstrap parameter payloads are released before bounded execution begins. Bounded gradients are written to a second `VersionedTensorStore`. The parameter store is never modified.
+
+Each unique parameter has one final gradient record. Tied token embeddings receive two contributions:
+
+1. output-head contribution, stored at gradient version 0;
+2. embedding contribution, added to the existing value and stored at version 1.
+
+This version history makes tied-gradient accumulation explicit and traceable.
+
+### Global gradient norm
+
+After all groups complete, the oracle and bounded gradient stores are streamed independently to calculate their global norms. The complete states are loaded together only for the final tensor-level validation comparison. The result includes the clipping coefficient that a later optimizer phase would apply. Version 0.7 does not update parameters.
+
+The complete final gradient state is materialized after bounded execution only for tensor-level validation against the resident oracle. The result reports this validation-only materialization explicitly.
+
+### Bounded backward telemetry
+
+Every backward group records:
+
+- reverse ordinal and group name;
+- parameter tensor names and bytes;
+- referenced chunk count;
+- input and output activation bytes;
+- incoming and outgoing activation-gradient bytes;
+- parameter read and materialization time;
+- local recomputation and backward time;
+- gradient extraction and commit time;
+- logical and physical gradient bytes written;
+- chunk writes and reuse;
+- release time;
+- local gradient and upstream-gradient checksums;
+- RSS, accelerator allocation, and driver allocation.
+
+The complete run reports:
+
+- parameter, oracle-gradient, and bounded-gradient manifest IDs;
+- batch checksum;
+- resident and bounded loss;
+- resident and bounded global gradient norm;
+- retained CPU activation bytes;
+- maximum parameter and gradient group bytes;
+- total parameter reads and gradient writes;
+- tied-gradient accumulation count and version;
+- final tensor-level gradient comparison;
+- parameter-manifest immutability;
+- store verification results.
 
 ## Development scale ladder
 
@@ -246,7 +322,7 @@ microcolossus storage-step \
   --device cpu
 ```
 
-Run the bounded forward reference:
+Run bounded forward:
 
 ```bash
 microcolossus bounded-forward \
@@ -257,35 +333,58 @@ microcolossus bounded-forward \
   --parameter-working-set-mib 1
 ```
 
-## Validated 0.5 target-hardware result
+Run bounded backward:
 
-A clean MacBook Air M2 run with 8 GB unified memory validated commit `82e53c671848d231c2361443882b97dbe4e3a408`:
+```bash
+microcolossus bounded-backward \
+  --config examples/micro-storage.yaml \
+  --parameter-store runs/micro-backward-parameters \
+  --oracle-gradient-store runs/micro-backward-oracle-gradients \
+  --gradient-store runs/micro-backward-gradients \
+  --output runs/micro-bounded-backward.json \
+  --device cpu \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1
+```
 
-- Ruff, mypy, 52 tests, and compileall passed;
-- two MPS micro storage-step runs were GREEN and bitwise repeatable;
-- the 443,648-parameter tiny MPS storage-step was GREEN;
-- resident-versus-storage loss, gradient norm, and final canonical state differences were zero;
-- storage-versus-restored state was exact;
-- all five interruption points preserved the previous committed manifest;
-- MLX micro and tiny round trips were exact;
-- PyTorch-versus-MLX canonical model state was GREEN;
+## Validated target-hardware results
+
+### Version 0.5
+
+A clean MacBook Air M2 run validated the storage-backed optimizer lifecycle, exact MLX round trips, all five failure-injection points, and zero resident-versus-storage differences for the tested PyTorch paths.
+
+### Version 0.6
+
+A clean MacBook Air M2 run with 8 GB unified memory validated commit `1feea9f9eef28e551ad4ae4944614083effa804f`:
+
+- Ruff, mypy, 56 tests, and compileall passed;
+- two micro bounded-forward runs were GREEN and bitwise exact;
+- the 443,648-parameter tiny bounded-forward run was GREEN;
+- group order and tied-embedding reload behavior were correct;
+- the largest micro group used `33,280` bytes;
+- the largest tiny group used `788,480` bytes;
+- both stayed below a `1,048,576` byte parameter budget;
+- every boundary, final logits, and loss matched the resident oracle exactly;
+- budget rejection passed;
+- parameter manifests remained unchanged;
+- stores verified and recovered;
 - no fallback, unsupported operation, non-finite value, allocation failure, or swap growth was detected;
 - the repository remained clean.
 
-The run reported `7,468,738` bytes read across `226` referenced chunks and `7,641,680` bytes written across `166` chunk writes, with `60` reused chunks. Maximum observed RSS was `432,472,064` bytes. Maximum MPS allocation was `8,709,376` bytes. Maximum Metal driver allocation was `28,049,408` bytes.
+Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes.
 
 ## Current boundary
 
 MicroColossus does not yet establish:
 
-- bounded backward propagation;
-- stored or streamed gradients;
-- bounded AdamW execution;
-- activation recomputation or offload;
+- streamed AdamW updates;
+- atomic publication of a complete bounded optimizer step;
+- activation recomputation from storage or activation offload;
 - asynchronous prefetch or writeback;
 - intra-layer tiling;
+- MLX bounded backward;
 - direct I/O or compression;
 - real-corpus language-model training;
 - training state larger than safe resident unified memory.
 
-The next step after target validation of bounded forward is a reverse-order bounded backward path, followed by a second streamed pass for global clipping and AdamW publication.
+The next milestone after validating bounded backward is a second streamed pass that reads parameter, gradient, and AdamW state group by group, applies global clipping, and atomically publishes a complete updated training state.

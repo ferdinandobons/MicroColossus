@@ -2,7 +2,7 @@
 
 > **Trade memory for time.**
 
-This document defines the purpose, constraints, architecture, verified evidence, and development path of MicroColossus.
+This document defines the purpose, constraints, architecture, evidence, and development path of MicroColossus.
 
 ## 1. Purpose
 
@@ -25,7 +25,7 @@ Training requires more than model weights. A full update may require:
 - optional master-weight copies;
 - activations or recomputation metadata;
 - logits and loss intermediates;
-- temporary operator workspaces;
+- operator workspaces;
 - framework, driver, and operating-system overhead.
 
 A machine can have enough storage for the complete state but insufficient safe resident memory. MicroColossus treats that mismatch as a scheduling and transaction problem whose complete cost must be measured.
@@ -150,8 +150,8 @@ bounded active working set <-> versioned NVMe tensor store
 The intended components are:
 
 - a controlled frontend with a small validated operator set;
-- a backend-neutral tensor manifest;
-- a planner for placement, tiling, prefetch, eviction, and recomputation;
+- backend-neutral tensor and execution-plan schemas;
+- placement, tiling, prefetch, eviction, and recomputation planning;
 - bounded staging and accelerator working-set policies;
 - a chunked, versioned, recoverable tensor store;
 - group-wise and tile-wise forward, backward, and optimizer execution;
@@ -161,9 +161,9 @@ The intended components are:
 
 The current decision is **DUAL BACKEND**.
 
-- **MLX** is the preferred native Apple Silicon execution candidate.
+- **MLX** is the preferred optimized Apple Silicon execution candidate.
 - **PyTorch MPS** is the portable numerical oracle and reference implementation.
-- **Storage, transactions, and execution-plan schemas** remain backend-neutral.
+- **Storage, transactions, and execution plans** remain backend-neutral.
 
 The decision is based on resident measurements. Every storage-backed path must be benchmarked independently before assigning all runtime responsibilities to one backend.
 
@@ -190,7 +190,7 @@ Implemented:
 
 Implemented:
 
-- explicit tensor, chunk, manifest, journal, and telemetry schemas;
+- tensor, chunk, manifest, journal, and telemetry schemas;
 - canonical little-endian tensor bytes;
 - content-addressed immutable chunks;
 - copy-on-write tensor versions;
@@ -222,27 +222,46 @@ This lifecycle still materializes the complete micro model and optimizer during 
 
 ### Bounded parameter-group forward
 
-Implemented in version 0.6:
+Implemented and validated on the target M2:
 
 - parameter-only canonical store;
-- explicit execution groups for embeddings, each Transformer block, and the final head;
-- one group materialized at a time;
+- execution groups for embeddings, each Transformer block, and the final head;
+- one parameter group materialized at a time;
 - tied token-embedding reload for the output projection;
 - logical parameter working-set budget rejection;
 - resident boundary, logits, and loss comparison;
 - per-group read, materialization, compute, release, activation, RSS, accelerator, and driver telemetry;
-- immutable store verification after forward execution.
+- immutable parameter-store verification.
 
-The first bounded executor retains hidden activations and implements forward propagation only.
+The first bounded forward executor retains hidden activations.
+
+### Bounded backward and gradient storage
+
+Implemented in version 0.7, pending target validation:
+
+- detached boundary activations retained on CPU;
+- reverse execution-group order;
+- one parameter group reloaded at a time;
+- local forward recomputation with autograd enabled;
+- one incoming activation gradient propagated at a time;
+- parameter gradients committed into a separate versioned gradient store;
+- tied token-embedding contribution accumulation with explicit gradient versioning;
+- streamed global gradient-norm calculation;
+- final gradient comparison with the resident PyTorch oracle;
+- immutable parameter manifest;
+- parameter and gradient working-set budgets;
+- per-group storage, compute, release, checksum, RSS, accelerator, and driver telemetry.
+
+The complete final gradient state is materialized after bounded execution only for validation. AdamW updates are not performed in this phase.
 
 ### Not implemented
 
-- bounded backward propagation;
-- stored or streamed gradients;
-- bounded AdamW execution;
-- runtime-managed activation recomputation or offload;
+- streamed AdamW parameter and optimizer-state updates;
+- atomic publication of a complete bounded optimizer step;
+- activation recomputation from storage or activation offload;
 - asynchronous storage overlap;
 - intra-layer tiling;
+- bounded MLX backward;
 - direct I/O or compression;
 - real-corpus training frontend;
 - training state larger than safe resident unified memory.
@@ -267,36 +286,23 @@ PyTorch and MLX remained numerically close. Maximum loss difference was about `1
 
 ### Clean target storage validation
 
-Version 0.5.0, commit `82e53c671848d231c2361443882b97dbe4e3a408`, passed on a clean MacBook Air M2:
+Version 0.5.0, commit `82e53c671848d231c2361443882b97dbe4e3a408`, passed on a clean MacBook Air M2. It validated exact storage lifecycle, recovery, failure injection, MLX round trips, and cross-backend canonical state for the tested micro and tiny paths.
 
-- Ruff, mypy, 52 tests, and compileall passed;
-- two MPS micro storage-step runs were GREEN and bitwise repeatable;
-- the 443,648-parameter tiny MPS storage-step was GREEN;
-- resident-versus-storage loss, gradient norm, and final state differences were zero;
-- storage-versus-restored state was exact;
-- all five interruption points preserved the prior committed manifest;
-- MLX micro and tiny round trips were exact;
-- PyTorch-versus-MLX canonical state was GREEN;
+### Clean target bounded-forward validation
+
+Version 0.6.0, commit `1feea9f9eef28e551ad4ae4944614083effa804f`, passed on the same 8 GB M2 target:
+
+- Ruff, mypy, 56 tests, and compileall passed;
+- two micro runs were GREEN and bitwise exact;
+- the 443,648-parameter tiny run was GREEN;
+- group order and tied-embedding reload were correct;
+- maximum group sizes were `33,280` bytes for micro and `788,480` bytes for tiny under a `1,048,576` byte budget;
+- boundary, logits, and loss differences were zero;
+- intentional budget rejection passed;
+- parameter manifests remained unchanged;
+- stores verified and recovered;
 - no fallback, unsupported operation, non-finite value, allocation failure, or swap growth was detected;
 - the source tree remained clean.
-
-Application-level totals included `7,468,738` bytes read and `7,641,680` bytes written, with `60` reused chunks. These values do not represent NAND-level writes.
-
-### Bounded forward CPU gate
-
-Version 0.6.0 passed the Python 3.11 and 3.13 pull-request CI matrix:
-
-- installation;
-- Ruff;
-- mypy;
-- complete pytest suite;
-- compileall;
-- resident CPU smoke;
-- storage lifecycle smoke;
-- bounded-forward CPU smoke;
-- final store verification.
-
-Target MPS validation remains required before the bounded-forward milestone is closed.
 
 ## 12. Competitive engineering policy
 
@@ -312,7 +318,7 @@ Direct Apple Silicon baselines include:
 6. MicroColossus reference execution;
 7. future compact and adapter modes, reported separately.
 
-An accepted comparison holds constant architecture, unique parameter count, initial arrays, input batches, dtype, optimizer semantics, clipping, sequence length, microbatch, synchronization, machine, and framework versions.
+An accepted comparison holds constant architecture, parameter count, initial arrays, input batches, dtype, optimizer semantics, clipping, sequence length, microbatch, synchronization, machine, and framework versions.
 
 Required metrics include numerical distance, latency, throughput, RSS, allocator counters, available memory, pressure, swap, storage reads and writes, estimated endurance, and recovery cost.
 
@@ -405,16 +411,25 @@ Status: completed.
 
 ### M4B1. Bounded parameter-group forward
 
-Status: implemented. Target MPS validation pending.
+Status: completed, including target M2 validation.
 
-### M4B2. Bounded backward and streamed optimizer update
+### M4B2. Bounded backward and gradient store
 
-Next after M4B1 target validation.
+Status: implemented. Target M2 validation pending.
 
-The first reference design uses two storage passes:
+This phase stores final parameter gradients separately, validates tied-gradient accumulation, and calculates the global gradient norm without changing parameters.
 
-1. reverse-order backward, store gradients, and accumulate the global squared norm;
-2. calculate the clipping factor, then stream parameters, gradients, and Adam state for atomic update publication.
+### M4B3. Streamed AdamW and atomic step publication
+
+Next after M4B2 target validation.
+
+The reference design will:
+
+1. read each parameter, final gradient, Adam first moment, Adam second moment, and step state group by group;
+2. apply the global clipping coefficient;
+3. calculate AdamW updates without retaining the full optimizer state;
+4. write candidate parameter and optimizer versions;
+5. publish one complete atomic training-step manifest only after every group is durable and valid.
 
 ### M5. Activation recomputation and strict budgets
 
@@ -457,7 +472,7 @@ Scale targets are research goals, not guaranteed outcomes.
 The first meaningful out-of-core training demonstration requires:
 
 1. the complete managed training state exceeds safe resident capacity;
-2. the active parameter, activation, and workspace set remains inside configured limits;
+2. the active parameter, activation, gradient, optimizer, and workspace set remains inside configured limits;
 3. updates are compared with the resident reference where feasible;
 4. every managed tensor version is traceable;
 5. storage traffic and writes are reported;

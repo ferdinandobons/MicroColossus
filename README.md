@@ -6,11 +6,11 @@ MicroColossus is an experimental open-source runtime for full-parameter training
 
 The primary target is **Apple Silicon, beginning with an 8 GB Mac M2**.
 
-- **MLX** is the preferred native Apple Silicon execution candidate.
+- **MLX** is the preferred optimized Apple Silicon execution candidate.
 - **PyTorch MPS** is the numerical oracle and the reference for validation, debugging, state comparison, and recovery semantics.
-- The tensor store, transaction protocol, and execution plans remain backend-neutral.
+- Tensor storage, transactions, and execution plans remain backend-neutral.
 
-The project does not yet claim out-of-core training. It has validated resident execution, durable storage-backed state, a complete micro optimizer lifecycle, and the target-hardware prerequisites for bounded execution.
+The project does not yet claim full out-of-core training. It has validated resident execution, recoverable storage-backed state, a complete observable micro optimizer lifecycle, and bounded parameter-group forward execution. Version 0.7 adds bounded backward propagation and versioned gradient storage for target-hardware validation.
 
 ## Why Apple Silicon changes the design
 
@@ -60,55 +60,74 @@ versioned NVMe tensor store
 - MLX model and optimizer-tree export and restore;
 - `store-init`, `store-verify`, and `store-recover` commands.
 
-### Observable storage-backed optimizer step
+### Observable storage-backed optimizer lifecycle
 
-Version 0.5 performs this complete micro lifecycle:
+Version 0.5 performs a complete micro lifecycle:
 
 1. create deterministic model and AdamW state;
-2. commit the canonical state to the tensor store;
-3. destroy the original resident objects;
+2. commit the canonical state to storage;
+3. destroy the bootstrap objects;
 4. execute an independently restored resident reference step;
 5. restore the same state from storage;
 6. execute the same optimizer step;
 7. publish the updated state atomically;
-8. restore the committed result again;
-9. compare model and optimizer state tensor-by-tensor.
+8. restore the committed result;
+9. compare model and optimizer state tensor by tensor.
 
 The compute phase still materializes the complete micro model and optimizer. This validates storage lifecycle, transactions, recovery, and observability. It is not a bounded training result.
 
 ### Bounded parameter-group forward
 
-Version 0.6 introduces the first bounded compute path:
+Version 0.6 introduced the first bounded compute path:
 
-- token and positional embeddings are loaded from the store, executed, and released;
-- one complete Transformer block is loaded and released at a time;
-- final normalization and output projection are loaded last;
-- tied token embeddings are reloaded for the output projection instead of being retained;
-- every execution group is rejected when its logical parameter bytes exceed the configured budget;
-- each group boundary, final logits, and loss are compared with the resident PyTorch oracle;
-- reads, chunk references, materialization, compute, release, activation bytes, RSS, accelerator allocation, and driver allocation are reported.
+- load and release token and positional embeddings;
+- load and release one Transformer block at a time;
+- load final normalization and the output projection last;
+- reload tied token embeddings for the output projection;
+- reject a group before compute when it exceeds the parameter budget;
+- compare every group boundary, final logits, and loss with the resident oracle;
+- report reads, chunks, timings, activation bytes, RSS, accelerator allocation, and driver allocation.
 
-The initial bounded executor retains hidden activations and implements forward propagation only. Bounded backward propagation and streamed optimizer execution remain future work.
+The executor retains hidden activations. Its bounded claim applies to managed parameter residency.
+
+### Bounded backward and gradient storage
+
+Version 0.7 adds the next isolated phase:
+
+- retain detached forward boundary activations on CPU;
+- process execution groups in reverse order;
+- reload one parameter group at a time;
+- recompute the local group with autograd enabled;
+- propagate one upstream activation gradient at a time;
+- commit parameter gradients into a separate versioned gradient store;
+- combine both tied token-embedding gradient contributions;
+- stream the gradient store to calculate the global gradient norm;
+- compare all final gradients with the resident PyTorch oracle;
+- keep the parameter manifest immutable.
+
+The complete final gradient state is materialized only after bounded execution for validation. AdamW updates are intentionally deferred to the next milestone.
 
 ## Validated Apple M2 evidence
 
-A clean MacBook Air M2 run with 8 GB unified memory validated version 0.5.0 at commit `82e53c671848d231c2361443882b97dbe4e3a408`:
+A clean MacBook Air M2 run with 8 GB unified memory validated version 0.6.0 at commit `1feea9f9eef28e551ad4ae4944614083effa804f`:
 
 - native arm64 execution without Rosetta;
-- Ruff, mypy, 52 tests, and compileall;
-- two GREEN MPS micro storage-step runs with bitwise repeatability;
-- one GREEN 443,648-parameter tiny MPS storage-step;
-- zero resident-versus-storage loss, gradient-norm, and final-state difference;
-- exact storage-versus-restored state;
-- all five injected interruption points preserving the prior committed manifest;
-- exact MLX micro and tiny round trips;
-- GREEN PyTorch-versus-MLX canonical model-state comparisons;
-- no detected fallback, unsupported operation, non-finite value, MPS allocation failure, or swap growth;
-- a clean source tree before and after validation.
+- Ruff, mypy, 56 tests, and compileall;
+- two GREEN micro bounded-forward runs;
+- bitwise-exact micro repeatability;
+- one GREEN 443,648-parameter tiny bounded-forward run;
+- zero boundary, logits, and loss differences from the resident oracle;
+- correct tied-embedding reload counts;
+- parameter groups limited to `33,280` bytes for micro and `788,480` bytes for tiny under a `1,048,576` byte budget;
+- intentional budget rejection;
+- unchanged parameter manifest;
+- successful store verification and recovery;
+- no detected fallback, unsupported operation, non-finite value, allocation failure, or swap growth;
+- a clean source tree.
 
-Aggregate application-level activity included `7,468,738` bytes read across `226` referenced chunks and `7,641,680` bytes written across `166` chunk writes, with `60` reused chunks. These counters do not represent NAND-level writes or APFS write amplification.
+Maximum observed RSS was `322,273,280` bytes. Maximum MPS allocation was `1,181,696` bytes. Maximum Metal driver allocation was `19,300,352` bytes. These counters are not summed as physical-memory equivalents.
 
-The resident competitive 23,213,056-parameter workload previously produced:
+The earlier resident 23,213,056-parameter benchmark produced:
 
 | Variant | Median tokens/s | Relative to PyTorch |
 |---|---:|---:|
@@ -116,7 +135,7 @@ The resident competitive 23,213,056-parameter workload previously produced:
 | PyTorch MPS checkpointed | 1,337.37 | 0.970x |
 | MLX | 2,195.69 | 1.592x |
 
-The current backend decision is **dual backend**. MLX is the preferred optimized Apple Silicon candidate. PyTorch remains the numerical oracle.
+The backend decision remains **dual backend**. MLX is the preferred optimized Apple Silicon candidate. PyTorch remains the numerical oracle.
 
 ## Fast development scale ladder
 
@@ -155,7 +174,7 @@ microcolossus plan --config examples/tiny-mps.yaml
 microcolossus train --config examples/tiny-mps.yaml
 ```
 
-Observable storage-backed micro optimizer step:
+Observable storage-backed optimizer lifecycle:
 
 ```bash
 microcolossus storage-step \
@@ -176,21 +195,33 @@ microcolossus bounded-forward \
   --parameter-working-set-mib 1
 ```
 
-On the target Mac, repeat the bounded-forward command with `--device mps`. Use the micro preset first, then `examples/tiny-mps.yaml` after the micro path passes.
+Bounded backward with separate oracle and bounded gradient stores:
+
+```bash
+microcolossus bounded-backward \
+  --config examples/micro-storage.yaml \
+  --parameter-store runs/micro-backward-parameters \
+  --oracle-gradient-store runs/micro-backward-oracle-gradients \
+  --gradient-store runs/micro-backward-gradients \
+  --output runs/micro-bounded-backward.json \
+  --device cpu \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1
+```
 
 ## Not yet implemented
 
-- bounded backward propagation;
-- stored or streamed gradients;
-- optimizer execution without full-state materialization;
-- runtime-managed activation recomputation or offload;
+- streamed AdamW parameter and optimizer-state updates;
+- atomic publication of a complete bounded optimizer step;
+- activation recomputation from storage or activation offload;
 - asynchronous prefetch and writeback;
 - intra-layer tiling;
+- bounded MLX backward;
 - direct I/O and storage-specific tuning;
 - full real-corpus pretraining frontend;
 - training state larger than safe resident unified memory.
 
-No out-of-core training, performance, or model-scale claim is made yet.
+No full out-of-core training, performance, or model-scale claim is made yet.
 
 ## Engineering policy
 
