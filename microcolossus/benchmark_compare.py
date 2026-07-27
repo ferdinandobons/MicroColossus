@@ -11,9 +11,9 @@ import numpy as np
 
 from .benchmark_data import array_mapping_checksum, load_array_mapping
 from .benchmark_types import (
-    BenchmarkComparison,
     COMPARISON_SCHEMA_VERSION,
     SCHEMA_VERSION,
+    BenchmarkComparison,
     TensorDifference,
 )
 from .telemetry import write_json_atomic
