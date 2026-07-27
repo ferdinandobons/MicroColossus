@@ -195,12 +195,13 @@ microcolossus bounded-forward \
   --parameter-working-set-mib 1
 ```
 
-Bounded backward with a separate gradient store:
+Bounded backward with separate oracle and bounded gradient stores:
 
 ```bash
 microcolossus bounded-backward \
   --config examples/micro-storage.yaml \
   --parameter-store runs/micro-backward-parameters \
+  --oracle-gradient-store runs/micro-backward-oracle-gradients \
   --gradient-store runs/micro-backward-gradients \
   --output runs/micro-bounded-backward.json \
   --device cpu \

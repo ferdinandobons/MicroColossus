@@ -240,7 +240,7 @@ Only one parameter group, one local activation, and one incoming activation grad
 
 ### Separate versioned gradient state
 
-Parameter gradients are written to a separate `VersionedTensorStore`. The parameter store is never modified.
+Resident-oracle gradients are first written to a dedicated versioned store. The resident gradient payloads and bootstrap parameter payloads are released before bounded execution begins. Bounded gradients are written to a second `VersionedTensorStore`. The parameter store is never modified.
 
 Each unique parameter has one final gradient record. Tied token embeddings receive two contributions:
 
@@ -251,7 +251,7 @@ This version history makes tied-gradient accumulation explicit and traceable.
 
 ### Global gradient norm
 
-After all groups complete, gradients are streamed from the gradient store to calculate the global norm. The result includes the clipping coefficient that a later optimizer phase would apply. Version 0.7 does not update parameters.
+After all groups complete, the oracle and bounded gradient stores are streamed independently to calculate their global norms. The complete states are loaded together only for the final tensor-level validation comparison. The result includes the clipping coefficient that a later optimizer phase would apply. Version 0.7 does not update parameters.
 
 The complete final gradient state is materialized after bounded execution only for tensor-level validation against the resident oracle. The result reports this validation-only materialization explicitly.
 
@@ -275,7 +275,7 @@ Every backward group records:
 
 The complete run reports:
 
-- parameter and gradient manifest IDs;
+- parameter, oracle-gradient, and bounded-gradient manifest IDs;
 - batch checksum;
 - resident and bounded loss;
 - resident and bounded global gradient norm;
@@ -339,6 +339,7 @@ Run bounded backward:
 microcolossus bounded-backward \
   --config examples/micro-storage.yaml \
   --parameter-store runs/micro-backward-parameters \
+  --oracle-gradient-store runs/micro-backward-oracle-gradients \
   --gradient-store runs/micro-backward-gradients \
   --output runs/micro-bounded-backward.json \
   --device cpu \
