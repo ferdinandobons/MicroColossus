@@ -1,0 +1,32 @@
+name: m2-competitive
+output_dir: runs/m2-competitive
+
+model:
+  vocab_size: 8192
+  max_sequence_length: 256
+  layers: 6
+  heads: 8
+  hidden_size: 512
+  mlp_ratio: 4
+  dropout: 0.0
+  norm_epsilon: 0.00001
+  tie_embeddings: true
+
+training:
+  mode: reference
+  steps: 5
+  micro_batch_size: 1
+  sequence_length: 128
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  seed: 42
+  device: mps
+
+hardware:
+  accelerator_memory_gib: 5.0
+  process_ram_gib: 5.0
+  system_memory_gib: 8.0
+  nvme_gib: 100.0
+  ssd_write_budget_tb: 100.0
+  memory_architecture: unified
