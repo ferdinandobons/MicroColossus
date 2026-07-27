@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -13,13 +14,11 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten
 
-from ..benchmarking import (
-    BenchmarkResult,
+from ..benchmark_data import system_memory_sample
+from ..benchmark_types import (
+    BackendMeasurements,
     BenchmarkSettings,
     BenchmarkStep,
-    create_result,
-    portable_parameter_count,
-    system_memory_sample,
 )
 from ..config import ExperimentConfig, ModelConfig
 from ..telemetry import process_rss_bytes
@@ -127,9 +126,7 @@ class MLXDecoderOnlyTransformer(nn.Module):
         self.lm_head = (
             None
             if config.tie_embeddings
-            else nn.Linear(
-                config.hidden_size, config.vocab_size, bias=False
-            )
+            else nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         )
 
     def __call__(self, input_ids: Any) -> Any:
@@ -159,17 +156,9 @@ def _framework_version() -> str:
 def _load_portable_state(
     model: MLXDecoderOnlyTransformer, state: dict[str, np.ndarray]
 ) -> None:
-    weights = [
-        (name, mx.array(value)) for name, value in sorted(state.items())
-    ]
+    weights = [(name, mx.array(value)) for name, value in sorted(state.items())]
     model.load_weights(weights, strict=True)
     mx.eval(model.parameters())
-
-
-def _parameter_count(model: MLXDecoderOnlyTransformer) -> int:
-    return sum(
-        int(value.size) for _name, value in tree_flatten(model.parameters())
-    )
 
 
 def _memory_value(name: str) -> int:
@@ -185,15 +174,24 @@ def _reset_peak_memory() -> None:
         function()
 
 
+def _export_state(
+    model: MLXDecoderOnlyTransformer,
+) -> dict[str, np.ndarray]:
+    mx.eval(model.parameters())
+    return {
+        name: np.ascontiguousarray(np.array(value, copy=True))
+        for name, value in tree_flatten(model.parameters())
+    }
+
+
 def run_mlx_benchmark(
     config: ExperimentConfig,
     settings: BenchmarkSettings,
     state: dict[str, np.ndarray],
     batches: tuple[tuple[np.ndarray, np.ndarray], ...],
-) -> BenchmarkResult:
+) -> BackendMeasurements:
     """Run an uncompiled MLX baseline on the default Apple GPU stream."""
 
-    initial_swap_used = system_memory_sample()[2]
     if config.model.dropout != 0.0:
         raise ValueError(
             "the initial cross-framework benchmark requires dropout=0"
@@ -202,12 +200,13 @@ def run_mlx_benchmark(
         raise ValueError(
             "the MLX benchmark requires training.device to be auto or mps"
         )
+
     mx.set_default_device(mx.gpu)
     mx.random.seed(config.training.seed)
     model = MLXDecoderOnlyTransformer(config.model)
     _load_portable_state(model, state)
-    if _parameter_count(model) != portable_parameter_count(state):
-        raise RuntimeError("MLX parameter count differs from the portable state")
+    state.clear()
+    gc.collect()
     model.train()
     optimizer = optim.AdamW(
         learning_rate=config.training.learning_rate,
@@ -223,13 +222,9 @@ def run_mlx_benchmark(
         targets: Any,
     ) -> Any:
         logits = current_model(input_ids)
-        flat_logits = mx.reshape(
-            logits, (-1, config.model.vocab_size)
-        )
+        flat_logits = mx.reshape(logits, (-1, config.model.vocab_size))
         flat_targets = mx.reshape(targets, (-1,))
-        return mx.mean(
-            nn.losses.cross_entropy(flat_logits, flat_targets)
-        )
+        return mx.mean(nn.losses.cross_entropy(flat_logits, flat_targets))
 
     loss_and_grad = nn.value_and_grad(model, loss_function)
     records: list[BenchmarkStep] = []
@@ -268,16 +263,11 @@ def run_mlx_benchmark(
             )
         )
 
-    return create_result(
-        config=config,
-        settings=settings,
+    return BackendMeasurements(
         framework="MLX",
         framework_version=_framework_version(),
         device=str(mx.default_device()),
-        state=state,
-        batches=batches,
         steps=tuple(records),
-        initial_system_swap_used_bytes=initial_swap_used,
         memory_semantics=(
             "MLX peak and cache allocator counters. They can undercount the "
             "operating-system footprint and require external cross-checks."
@@ -285,6 +275,9 @@ def run_mlx_benchmark(
         warnings=(
             "Input array creation is performed before the timed region.",
             "MLX lazy graphs are evaluated and synchronized once per step.",
+            "The portable NumPy initialization arrays are released before warm-up.",
+            "Final parameters are exported after the timed region.",
             "This backend is uncompiled; compiled MLX is a separate variant.",
         ),
+        final_state=_export_state(model),
     )

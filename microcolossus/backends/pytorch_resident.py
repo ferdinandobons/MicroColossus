@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
+import gc
 import time
 from importlib.metadata import PackageNotFoundError, version
 
 import numpy as np
 import torch
 
-from ..benchmarking import (
-    BenchmarkResult,
+from ..benchmark_data import system_memory_sample
+from ..benchmark_types import (
+    BackendMeasurements,
     BenchmarkSettings,
     BenchmarkStep,
-    create_result,
-    portable_parameter_count,
-    system_memory_sample,
 )
 from ..config import ExperimentConfig
 from ..model import DecoderOnlyTransformer
@@ -54,21 +53,28 @@ def _load_portable_state(
             parameter.copy_(source)
 
 
+def _export_state(model: DecoderOnlyTransformer) -> dict[str, np.ndarray]:
+    return {
+        name: parameter.detach().cpu().float().contiguous().numpy().copy()
+        for name, parameter in model.named_parameters()
+    }
+
+
 def run_pytorch_benchmark(
     config: ExperimentConfig,
     settings: BenchmarkSettings,
     state: dict[str, np.ndarray],
     batches: tuple[tuple[np.ndarray, np.ndarray], ...],
-) -> BenchmarkResult:
+) -> BackendMeasurements:
     """Run synchronized training steps without checksums in the timed region."""
 
-    initial_swap_used = system_memory_sample()[2]
     seed_everything(config.training.seed)
     device = resolve_device(config.training.device)
     model = DecoderOnlyTransformer(config.model).to(device)
     _load_portable_state(model, state)
-    if model.parameter_count != portable_parameter_count(state):
-        raise RuntimeError("PyTorch parameter count differs from the portable state")
+    state.clear()
+    gc.collect()
+
     model.train()
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -130,25 +136,23 @@ def run_pytorch_benchmark(
     warnings = [
         "Input conversion is performed before the timed region.",
         "Per-step model checksums are disabled because they force full CPU readback.",
+        "The portable NumPy initialization arrays are released before warm-up.",
+        "Final parameters are exported after the timed region.",
     ]
     if device.type == "mps":
         warnings.append(
             "PyTorch MPS reports current tensor and driver allocations, not a "
             "resettable per-step physical-memory peak."
         )
-    return create_result(
-        config=config,
-        settings=settings,
+    return BackendMeasurements(
         framework="PyTorch",
         framework_version=_framework_version(),
         device=str(device),
-        state=state,
-        batches=batches,
         steps=tuple(records),
-        initial_system_swap_used_bytes=initial_swap_used,
         memory_semantics=(
             "PyTorch allocator counters. On MPS, current tensor and Metal driver "
             "values overlap with process and unified-memory accounting."
         ),
         warnings=tuple(warnings),
+        final_state=_export_state(model),
     )
