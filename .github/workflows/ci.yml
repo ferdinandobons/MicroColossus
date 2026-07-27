@@ -18,7 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply oracle gradient-store patch locally
-        run: git apply tools/oracle-gradient-store.patch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          git fetch origin "$HEAD_REF"
+          git checkout -B "$HEAD_REF" "origin/$HEAD_REF"
+          git apply tools/oracle-gradient-store.patch
       - name: Publish oracle gradient-store patch
         if: matrix.python-version == '3.11' && github.event_name == 'pull_request'
         env:
