@@ -114,11 +114,14 @@ Before mutation, apply requires:
 2. a valid checksummed pruning plan;
 3. the same `CURRENT` bundle ID, bundle checksum, committed step, and pointer bytes recorded by the plan;
 4. valid contiguous root lineage;
-5. successful verification of every retained root and every retained child store;
-6. a filesystem inventory matching the plan exactly;
-7. exclusive ownership of the pruning lock.
+5. the same retained checkpoint set and reachable retained child-store paths;
+6. successful verification of every retained root and every retained child store;
+7. exact recursive inventory equality for every planned deletion target;
+8. exclusive ownership of the pruning lock.
 
 A mismatch aborts before deletion.
+
+Read-only inspection of retained tensor stores can append telemetry after planning. That telemetry is not part of checkpoint authority and does not invalidate a plan when `CURRENT`, lineage, retained references, tensor manifests, chunks, and every deletion-target inventory remain unchanged. A changed file inside a planned deletion target is still rejected.
 
 ## 7. Protected paths
 
@@ -242,7 +245,7 @@ Because root manifests and progress records remain contiguous, the normal resume
 - progress-record bundle IDs;
 - optimizer step tensors.
 
-CPU tests compare a pruned trajectory against an otherwise equivalent unpruned trajectory and require exact final canonical state.
+CPU tests require exact final canonical state against an otherwise equivalent unpruned trajectory. The accepted Apple M2 gate allows the established tight MPS numerical band while requiring identical batch provenance and exact candidate restore.
 
 ## 15. CLI
 
@@ -317,23 +320,79 @@ Reports distinguish:
 
 These are application-level file-content measurements. They are not NAND-level writes or guaranteed filesystem block reclamation. APFS copy-on-write behavior, sparse allocation, metadata amplification, snapshots, compression, and SSD-controller behavior remain outside these counters.
 
-## 19. Current validation status
+## 19. Accepted Apple M2 validation
 
-Version 0.11 includes CPU unit, integration, CLI, interruption, corruption, idempotence, and resume-equivalence tests. Python 3.11 and 3.13 CI must pass before merge.
+The corrected pruning runtime was validated on:
 
-The milestone remains open until a clean Apple M2 filesystem validation demonstrates:
+```text
+commit: 1fedf611e7a090dad218be64811e0a4e007fbd77
+version: 0.11.0
+machine: MacBook Air Mac14,2, Apple M2, 8 GB
+filesystem: APFS
+architecture: native arm64, Rosetta 0
+```
 
-- deterministic plan output;
-- material storage reclamation on a real training root;
-- byte-identical `CURRENT`;
-- retained-checkpoint verification;
-- interrupted-apply recovery;
-- process resume after pruning;
-- clean source state.
+Project gates:
+
+- Ruff: PASS;
+- mypy: PASS across 38 source files;
+- pytest: PASS, 103 passed and 1 skipped;
+- compileall: PASS;
+- MPS built and available;
+- final source tree clean.
+
+Micro gate at step 10:
+
+- two dry-run plans were byte-identical;
+- retained steps: `[0, 5, 9, 10]`;
+- pruned steps: `[1, 2, 3, 4, 6, 7, 8]`;
+- planned deletion paths: `23`;
+- selected and reclaimed managed bytes: `10,739,392`;
+- managed bytes: `13,037,759 -> 2,330,216`;
+- APFS allocated bytes from `du`: `16,830,464 -> 3,235,840`;
+- `CURRENT` bytes and current state digest remained unchanged;
+- retained checkpoints verified;
+- repeated apply was idempotent with zero newly reclaimed bytes;
+- MPS resume from step 10 to step 12 passed.
+
+Pruned versus unpruned micro trajectory:
+
+```text
+classification: NUMERICALLY_STABLE
+maximum state absolute difference: 1.1920928955078125e-07
+training-loss difference:          0.0
+maximum validation-loss difference: 2.384185791015625e-07
+batch provenance equal:            true
+sample sequences equal:            true
+candidate restore exact:           true
+```
+
+Safety regressions passed:
+
+- pre-journal interruption, retained-state telemetry inspection, and retry;
+- interruption after one deletion and idempotent continuation;
+- rejection of a deletion target changed after planning.
+
+Small real-text gate:
+
+```text
+parameters:                 1,846,656
+parameter budget:           2 MiB
+gradient budget:            2 MiB
+optimizer budget:           32 MiB
+selected/reclaimed bytes:   289,540,389
+managed-byte reduction:     289,445,109
+APFS du reduction:          292,491,264
+resume:                     step 5 -> step 6 PASS
+```
+
+No hidden CPU fallback, unsupported MPS operator, unexpected non-finite value, or unexpected command failure remained after audit.
+
+This completes M6A for the tested synchronous APFS path.
 
 ## 20. Boundary
 
-Version 0.11 does not yet provide:
+Version 0.11 does not provide:
 
 - live chunk repacking across retained stores;
 - content deduplication across store directories;
@@ -341,6 +400,7 @@ Version 0.11 does not yet provide:
 - background storage-pressure monitoring;
 - remote or object storage;
 - filesystem-specific reflinks;
-- activation offload or recomputation;
+- activation offload;
 - asynchronous prefetch or writeback;
+- direct-I/O or device-specific NVMe behavior;
 - training state larger than unified memory.
