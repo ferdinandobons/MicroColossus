@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/m6c-hybrid-anchors
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
