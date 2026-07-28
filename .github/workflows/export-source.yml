@@ -9,9 +9,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Package source
-        run: tar --exclude=.git -czf microcolossus-source.tar.gz .
+        run: tar --exclude=.git -czf /tmp/microcolossus-source.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: microcolossus-source
-          path: microcolossus-source.tar.gz
+          path: /tmp/microcolossus-source.tar.gz
           if-no-files-found: error
