@@ -46,6 +46,18 @@ def _parser() -> argparse.ArgumentParser:
         default=4.0,
         help="maximum logical parameter, gradient, and Adam bytes for one group",
     )
+    parser.add_argument(
+        "--activation-working-set-mib",
+        type=float,
+        default=1.0,
+        help="maximum retained activation and activation-gradient bytes",
+    )
+    parser.add_argument(
+        "--workspace-working-set-mib",
+        type=float,
+        default=4.0,
+        help="maximum logical local forward/backward activation workspace",
+    )
     return parser
 
 
@@ -64,6 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parameter_working_set_bytes=int(args.parameter_working_set_mib * mib),
         gradient_working_set_bytes=int(args.gradient_working_set_mib * mib),
         optimizer_working_set_bytes=int(args.optimizer_working_set_mib * mib),
+        activation_working_set_bytes=int(args.activation_working_set_mib * mib),
+        workspace_working_set_bytes=int(args.workspace_working_set_mib * mib),
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return 0
