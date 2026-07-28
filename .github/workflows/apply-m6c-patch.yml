@@ -1,0 +1,39 @@
+name: Apply M6C implementation patch
+
+on:
+  push:
+    branches:
+      - agent/m6c-hybrid-anchors
+    paths:
+      - .github/m6c-patch.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m6c-hybrid-anchors
+          fetch-depth: 0
+      - name: Decode and apply implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/m6c-patch.b64 > /tmp/m6c.patch
+          rm .github/m6c-patch.b64
+          git apply /tmp/m6c.patch
+          rm .github/workflows/apply-m6c-patch.yml
+          git diff --check
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "OpenAI Agent"
+          git config user.email "agent@example.invalid"
+          git add -A
+          git diff --cached --check
+          git commit -m "Implement measured hybrid activation anchors"
+          git push origin HEAD:agent/m6c-hybrid-anchors
