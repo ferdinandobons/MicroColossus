@@ -1,0 +1,180 @@
+name: Apply M6C integration
+
+on:
+  push:
+    branches:
+      - agent/m6c-hybrid-activation-planner
+    paths:
+      - .github/workflows/apply-m6c-integration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m6c-hybrid-activation-planner
+      - name: Patch persistent coordinator
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('microcolossus/bounded_training.py')
+          text = path.read_text()
+          if 'from .activation_runtime import resolve_activation_plan\n' not in text:
+              marker = 'from .config import ExperimentConfig\n'
+              text = text.replace(
+                  marker,
+                  'from .activation_runtime import resolve_activation_plan\n' + marker,
+                  1,
+              )
+          if '_validate_root_activation_plan,' not in text:
+              text = text.replace(
+                  '    _validate_resume_metadata,\n',
+                  '    _validate_resume_metadata,\n    _validate_root_activation_plan,\n',
+                  1,
+              )
+          marker = '    data_source = _prepare_data_source_for_run(config)\n'
+          if 'activation_plan = resolve_activation_plan(' not in text:
+              text = text.replace(
+                  marker,
+                  '    activation_plan = resolve_activation_plan(\n'
+                  '        config,\n'
+                  '        activation_working_set_bytes=activation_working_set_bytes,\n'
+                  '        workspace_working_set_bytes=workspace_working_set_bytes,\n'
+                  '    )\n' + marker,
+                  1,
+              )
+          text = text.replace(
+              '        _validate_resume_metadata(config, metadata, data_source)\n',
+              '        _validate_resume_metadata(\n'
+              '            config, metadata, data_source, activation_plan\n'
+              '        )\n'
+              '        _validate_root_activation_plan(destination, activation_plan)\n',
+              1,
+          )
+          text = text.replace(
+              '_initialize_training_root(config, destination, data_source)',
+              '_initialize_training_root(\n'
+              '                config, destination, data_source, activation_plan\n'
+              '            )',
+              1,
+          )
+          if '            activation_plan=activation_plan,\n' not in text:
+              text = text.replace(
+                  '            workspace_working_set_bytes=workspace_working_set_bytes,\n'
+                  '            bundle_failure_injector=bundle_failure_injector,\n',
+                  '            workspace_working_set_bytes=workspace_working_set_bytes,\n'
+                  '            activation_plan=activation_plan,\n'
+                  '            bundle_failure_injector=bundle_failure_injector,\n',
+                  1,
+              )
+          if '        activation_plan_checksum=(' not in text:
+              text = text.replace(
+                  '        activation_policy=config.training.activation_policy,\n'
+                  '        activation_working_set_budget_bytes=activation_working_set_bytes,\n',
+                  '        activation_policy=config.training.activation_policy,\n'
+                  '        activation_plan_checksum=(\n'
+                  '            None if activation_plan is None else activation_plan.plan_checksum\n'
+                  '        ),\n'
+                  '        activation_profile_checksum=(\n'
+                  '            None if activation_plan is None else activation_plan.profile_checksum\n'
+                  '        ),\n'
+                  '        activation_anchor_group_names=(\n'
+                  '            () if activation_plan is None else activation_plan.anchor_group_names\n'
+                  '        ),\n'
+                  '        activation_working_set_budget_bytes=activation_working_set_bytes,\n',
+                  1,
+              )
+          if '        maximum_replayed_groups=max(' not in text:
+              text = text.replace(
+                  '        maximum_retained_forward_boundary_bytes=max(\n'
+                  '            (item.retained_forward_boundary_bytes for item in step_results),\n'
+                  '            default=0,\n'
+                  '        ),\n'
+                  '        total_prefix_replayed_groups=sum(\n',
+                  '        maximum_retained_forward_boundary_bytes=max(\n'
+                  '            (item.retained_forward_boundary_bytes for item in step_results),\n'
+                  '            default=0,\n'
+                  '        ),\n'
+                  '        maximum_replayed_groups=max(\n'
+                  '            (item.maximum_replayed_groups for item in step_results),\n'
+                  '            default=0,\n'
+                  '        ),\n'
+                  '        total_prefix_replayed_groups=sum(\n',
+                  1,
+              )
+          if '        total_prefix_parameter_logical_bytes_read=sum(' not in text:
+              text = text.replace(
+                  '        total_prefix_recomputation_seconds=sum(\n'
+                  '            item.total_prefix_recomputation_seconds for item in step_results\n'
+                  '        ),\n'
+                  '        total_parameter_logical_bytes_read=sum(\n',
+                  '        total_prefix_parameter_logical_bytes_read=sum(\n'
+                  '            item.total_prefix_parameter_logical_bytes_read\n'
+                  '            for item in step_results\n'
+                  '        ),\n'
+                  '        total_prefix_parameter_chunk_reads=sum(\n'
+                  '            item.total_prefix_parameter_chunk_reads for item in step_results\n'
+                  '        ),\n'
+                  '        total_prefix_recomputation_seconds=sum(\n'
+                  '            item.total_prefix_recomputation_seconds for item in step_results\n'
+                  '        ),\n'
+                  '        total_parameter_logical_bytes_read=sum(\n',
+                  1,
+              )
+          path.write_text(text)
+          PY
+      - name: Patch package surface and release
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          init = Path('microcolossus/__init__.py')
+          text = init.read_text()
+          text = text.replace('__version__ = "0.12.0"', '__version__ = "0.13.0"')
+          if 'from .activation_planner import (' not in text:
+              insertion = '''from .activation_planner import (
+              ACTIVATION_PLAN_SCHEMA_VERSION,
+              ACTIVATION_PLANNER_VERSION,
+              ACTIVATION_PROFILE_SCHEMA_VERSION,
+              ActivationMeasurementProfile,
+              ActivationPlan,
+              ActivationPlanError,
+              ActivationPlanInfeasibleError,
+              build_activation_plan,
+              build_logical_activation_profile,
+              build_measured_activation_profile,
+              load_activation_plan,
+              load_activation_profile,
+          )
+          '''
+              text = insertion + text
+          init.write_text(text)
+
+          project = Path('pyproject.toml')
+          text = project.read_text()
+          text = text.replace('version = "0.12.0"', 'version = "0.13.0"')
+          if 'microcolossus-activation-plan' not in text:
+              text = text.replace(
+                  'microcolossus-activation-recompute = "microcolossus.activation_recompute_cli:main"\n',
+                  'microcolossus-activation-recompute = "microcolossus.activation_recompute_cli:main"\n'
+                  'microcolossus-activation-plan = "microcolossus.activation_planner_cli:main"\n',
+              )
+          project.write_text(text)
+          PY
+      - name: Compile patched files
+        run: python -m compileall -q microcolossus
+      - name: Commit generated integration
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add microcolossus/bounded_training.py microcolossus/__init__.py pyproject.toml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Integrate hybrid activation planning into persistent training"
+          git push origin HEAD:agent/m6c-hybrid-activation-planner
