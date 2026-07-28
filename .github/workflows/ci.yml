@@ -62,6 +62,7 @@ jobs:
         run: |
           microcolossus doctor
           microcolossus bounded-step --help
+          microcolossus-activation-recompute --help
           microcolossus-bounded-train --help
           microcolossus-prune --help
           microcolossus plan --config examples/tiny-mps.yaml
@@ -109,6 +110,20 @@ jobs:
             --path /tmp/microcolossus-bounded-backward-oracle-gradients
           microcolossus store-verify \
             --path /tmp/microcolossus-bounded-backward-gradients
+          microcolossus-activation-recompute \
+            --config examples/micro-storage.yaml \
+            --parameter-store /tmp/microcolossus-recompute-parameters \
+            --oracle-gradient-store /tmp/microcolossus-recompute-oracle-gradients \
+            --gradient-store /tmp/microcolossus-recompute-gradients \
+            --output /tmp/microcolossus-recompute.json \
+            --device cpu \
+            --parameter-working-set-mib 1 \
+            --gradient-working-set-mib 1 \
+            --activation-working-set-mib 1 \
+            --workspace-working-set-mib 4
+          microcolossus store-verify --path /tmp/microcolossus-recompute-parameters
+          microcolossus store-verify --path /tmp/microcolossus-recompute-oracle-gradients
+          microcolossus store-verify --path /tmp/microcolossus-recompute-gradients
           microcolossus bounded-step \
             --config examples/micro-storage.yaml \
             --bundle-store /tmp/microcolossus-bounded-step-bundle \
