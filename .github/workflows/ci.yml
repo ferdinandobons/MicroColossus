@@ -63,6 +63,7 @@ jobs:
           microcolossus doctor
           microcolossus bounded-step --help
           microcolossus-bounded-train --help
+          microcolossus-prune --help
           microcolossus plan --config examples/tiny-mps.yaml
           microcolossus plan --config examples/real-text-micro.yaml
           microcolossus train --config examples/tiny-resident.yaml --steps 1 --device cpu
@@ -127,6 +128,23 @@ jobs:
             --bundle-store /tmp/microcolossus-bounded-training-bundle \
             --target-step 3 \
             --output /tmp/microcolossus-bounded-training-step-3.json \
+            --device cpu
+          microcolossus-prune plan \
+            --config examples/micro-storage.yaml \
+            --bundle-store /tmp/microcolossus-bounded-training-bundle \
+            --keep-previous 0 \
+            --milestone-interval 0 \
+            --output /tmp/microcolossus-pruning-plan.json
+          microcolossus-prune apply \
+            --config examples/micro-storage.yaml \
+            --bundle-store /tmp/microcolossus-bounded-training-bundle \
+            --plan /tmp/microcolossus-pruning-plan.json \
+            --output /tmp/microcolossus-pruning-report.json
+          microcolossus-bounded-train \
+            --config examples/micro-storage.yaml \
+            --bundle-store /tmp/microcolossus-bounded-training-bundle \
+            --target-step 4 \
+            --output /tmp/microcolossus-bounded-training-step-4.json \
             --device cpu
           microcolossus-bounded-train \
             --config examples/real-text-micro.yaml \
