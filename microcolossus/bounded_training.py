@@ -15,6 +15,7 @@ from .data import PreparedDataSource
 from .evaluation import ensure_progress_record, load_progress_records
 from .model import DecoderOnlyTransformer
 from .persistent_step import advance_one_step
+from .pruning import assert_pruning_inactive
 from .step_bundle import BundleFailureInjector, BundlePublicationTelemetry, StepBundleStore
 from .storage import IntegrityError, TensorPayload
 from .storage.adapters import export_pytorch_state, payload_to_torch, restore_pytorch_state
@@ -187,6 +188,7 @@ def run_bounded_training(
     destination = Path(bundle_store_path)
     initialization_publication: BundlePublicationTelemetry | None = None
     if destination.exists():
+        assert_pruning_inactive(destination)
         bundle_store = StepBundleStore.open(destination)
         metadata = _load_training_metadata(destination)
         _validate_resume_metadata(config, metadata, data_source)
