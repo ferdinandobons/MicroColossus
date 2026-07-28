@@ -26,6 +26,7 @@ Mandatory distinctions:
 - a multi-step synthetic run is not real-corpus training;
 - a CPU result is not evidence for MPS or MLX;
 - a functional pass with tracked local changes is not a clean protocol pass;
+- a protocol expectation can be wrong even when the checked runtime is correct;
 - checksum equality is stronger than numerical agreement;
 - framework memory counters are not equivalent physical-memory counters;
 - application storage bytes are not NAND-level writes;
@@ -44,6 +45,7 @@ Mandatory distinctions:
 | Bounded backward | `c72dcc2f8d8a7bd783ae263cf14476d0681b664b`, 0.7.0 | PASS on 8 GB M2 | Reverse group execution produced exact tested gradients and valid gradient stores |
 | Bounded AdamW and root bundles | `ef88198d66f1d1795ffa14dcb6db388ae1715e85`, 0.8.0 | PASS on 8 GB M2 | One complete group-bounded optimizer step and atomic root publication work on MPS |
 | Persistent multi-step and resume | `4b1ffb20857dd948d7737484e62b007f24bf69b9`, 0.9.0 | PASS on 8 GB M2 | Consecutive bounded steps, process restart, exact resume, lineage, and later-step atomicity work on MPS |
+| Deterministic real-text training | `8bc277123267c3d3f15bf60cd640819fa823d2e3`, 0.10.0 | PASS on 8 GB M2 after protocol correction | Real-text micro and 1.85M trajectories, validation, samples, provenance, mutation rejection, and resume work on MPS |
 
 ## 3. Resident Apple M2 foundation
 
@@ -86,9 +88,7 @@ MPS bitwise and numerical reproducibility remain separate properties.
 
 ## 4. Competitive PyTorch MPS and MLX validation
 
-### 4.1 Accepted runtime benchmark
-
-Tested commit:
+Accepted runtime commit:
 
 ```text
 785183a1ff87df0c22df9619d1ab7bf53968bc79
@@ -105,21 +105,6 @@ Environment:
 - MPS-to-CPU fallback disabled.
 
 The run completed all tiny smoke paths and nine 23,213,056-parameter competitive runs with identical initial portable-state and batch checksums.
-
-Competitive workload:
-
-```text
-parameters:          23,213,056
-Transformer blocks: 6
-hidden size:         512
-attention heads:     8
-vocabulary:          8,192
-sequence length:     128
-microbatch:          1
-precision:           FP32
-optimizer:           full-parameter AdamW
-rounds:              3 counterbalanced rounds
-```
 
 Performance:
 
@@ -149,7 +134,7 @@ Decision: **DUAL BACKEND**.
 
 MicroColossus 0.4 introduced canonical tensor, chunk, manifest, journal, and telemetry schemas, content-addressed immutable chunks, copy-on-write versions, atomic `CURRENT`, corruption detection, conservative recovery, failure injection, and PyTorch and MLX adapters.
 
-MicroColossus 0.5 added one fully observed storage-backed micro optimizer lifecycle.
+MicroColossus 0.5 added one fully observed storage-backed optimizer lifecycle.
 
 Accepted commit:
 
@@ -266,17 +251,6 @@ Package version: `0.8.0`.
 
 Overall result: **PASS**.
 
-Environment and quality:
-
-- MacBook Air `Mac14,2`, Apple M2, 8 GB unified memory;
-- native arm64 without Rosetta;
-- Python 3.13.12;
-- PyTorch 2.13.0;
-- MPS built and available;
-- fallback unset;
-- Ruff, mypy, 72 tests with one skip, and compileall passed;
-- source tree clean before and after execution.
-
 Successful runs:
 
 - micro run 1: GREEN;
@@ -320,8 +294,6 @@ Observed resources:
 
 The zero sampled MPS allocation is recorded as reported and is not treated as evidence that the MPS path did not execute.
 
-M4B3 established one complete bounded optimizer step. It did not yet establish a persistent trajectory.
-
 ## 9. Persistent multi-step training and process resume
 
 Version 0.9 advances the authoritative root from step N to step N+1, preserving parameter state, Adam moments, optimizer step tensors, parent lineage, batch provenance, and configuration identity.
@@ -336,33 +308,18 @@ Package version: `0.9.0`.
 
 Overall result: **PASS**.
 
-### 9.1 Environment and source integrity
+Environment and quality:
 
-- MacBook Air `Mac14,2`;
-- Apple M2 with 8 GPU cores;
-- 8 GB unified memory;
-- native arm64;
-- Rosetta translation value `0`;
+- MacBook Air `Mac14,2` with Apple M2 and 8 GB unified memory;
+- native arm64 without Rosetta;
 - Python 3.13.12;
 - PyTorch 2.13.0;
 - MPS built and available;
 - `PYTORCH_ENABLE_MPS_FALLBACK` unset;
-- free storage before installation: `9,346,940,928` bytes;
-- free storage after validation: `8,295,481,344` bytes;
-- initial and final `git status --short`: empty;
-- final `git diff --check`: clean.
+- Ruff, mypy, 80 tests with one skip, and compileall passed;
+- source tree clean before and after execution.
 
-### 9.2 Project quality gate
-
-- Ruff: PASS;
-- mypy: PASS over 33 source files;
-- pytest: PASS, 80 passed and 1 skipped;
-- compileall: PASS;
-- doctor: PASS;
-- bounded training CLI help: PASS;
-- micro and tiny static plans: PASS.
-
-### 9.3 Successful trajectories
+Successful trajectories:
 
 | Scenario | Start | Final | Resume | Classification |
 |---|---:|---:|---|---|
@@ -371,29 +328,10 @@ Overall result: **PASS**.
 | Micro process restart | 2 | 5 | true | GREEN |
 | Tiny uninterrupted | 0 | 3 | false | GREEN |
 
-Lineage:
-
-```text
-micro uninterrupted: [0, 1, 2, 3, 4, 5]
-micro resumed:       [0, 1, 2, 3, 4, 5]
-tiny:                [0, 1, 2, 3]
-```
-
-Batch cursor, seed, and checksum sequences were equivalent between uninterrupted and resumed micro execution.
-
-Final optimizer step tensors:
-
-- every micro tensor: `5.0`;
-- every tiny tensor: `3.0`.
-
-### 9.4 Resume equivalence
-
 Uninterrupted step 0 to 5 and process-restarted step 0 to 2 plus step 2 to 5 produced:
 
 ```text
 classification: BITWISE_EXACT
-names equal: true
-structures equal: true
 canonical bytes equal: true
 maximum absolute difference: 0.0
 mean absolute difference: 0.0
@@ -406,11 +344,7 @@ gradient-norm trajectory equal: true
 clipping trajectory equal: true
 ```
 
-This is the accepted proof that process restart did not reinitialize model or Adam state in the tested path.
-
-### 9.5 Numerical comparison with the resident reference
-
-Across the accepted scenarios:
+Numerical comparison with resident replay:
 
 - maximum per-step loss difference: `0.0`;
 - maximum per-step gradient-norm difference: `1.6985336648289717e-07`;
@@ -419,132 +353,266 @@ Across the accepted scenarios:
 - final candidate restore exactness: true;
 - all values finite.
 
-Tiny final-state comparison was tighter:
-
-- maximum absolute difference: `2.3283064365386963e-10`;
-- mean absolute difference: `3.718845572899834e-16`.
-
-The final resident replay is validation-only. It is not part of the bounded production path.
-
-### 9.6 Working-set evidence
-
-| Configuration | Maximum parameter group | Maximum gradient group | Maximum optimizer group |
-|---|---:|---:|---:|
-| Micro | 33,280 bytes | 33,280 bytes | 133,152 bytes |
-| Tiny | 788,480 bytes | 788,480 bytes | 3,153,952 bytes |
-
-Configured budgets:
-
-```text
-parameter: 1,048,576 bytes
-gradient:  1,048,576 bytes
-optimizer: 4,194,304 bytes
-```
-
-All successful groups respected their budgets.
-
-Intentional rejection results:
-
-- parameter: PASS_PARAMETER_BUDGET_REJECTION;
-- gradient: PASS_GRADIENT_BUDGET_REJECTION;
-- optimizer: PASS_OPTIMIZER_BUDGET_REJECTION.
-
-Each rejected training root retained authoritative step 0 and remained verifiable and recoverable.
-
-### 9.7 Later-step atomicity
-
-The failure harness first completed step 2, then interrupted publication of step 3.
-
-Before bundle-manifest rename:
-
-```text
-result: PASS_PREVIOUS_STEP_2_PRESERVED
-CURRENT before: step 2
-CURRENT after:  step 2
-```
-
-Before root `CURRENT` rename:
-
-```text
-result: PASS_PREVIOUS_STEP_2_PRESERVED
-CURRENT before: step 2
-CURRENT after:  step 2
-unpublished step-3 bundle: reported by recovery
-```
-
-Candidate child stores may exist after interruption, but they do not become authoritative without root publication.
-
-### 9.8 Resume and integrity rejection
-
-Configuration mismatch:
-
-```text
-PASS_CONFIGURATION_MISMATCH_REJECTED
-```
-
-A changed learning rate produced `ResumeConfigurationError` identifying `config_digest`. Step 2 remained authoritative.
-
-Corrupt child state:
-
-```text
-PASS_CORRUPT_CHILD_DETECTED
-```
-
-A referenced parameter chunk was shortened from 8,192 bytes to 24 bytes in an isolated copy. Resume failed with `IntegrityError` before publishing another step.
-
-### 9.9 Storage and publication telemetry
-
-Across successful roots in the accepted validation:
-
-- total root storage size: `59,901,060` bytes;
-- parameter bytes read: `5,782,016`;
-- parameter bytes written: `5,782,016`;
-- gradient bytes read: `5,782,016`;
-- optimizer bytes read: `11,564,752`;
-- optimizer bytes written: `11,572,248`;
-- reused chunks: `167`;
-- publication `fsync` total: `0.0074204159` seconds;
-- rename and publication total: `0.0025823780` seconds.
+Later-step atomicity, configuration mismatch rejection, corrupt-child detection, and all three working-set rejections passed. Swap delta was zero.
 
 Historical root bundles and child stores were retained. No automatic pruning or compaction was tested.
 
-These are application-level counters. They are not physical NAND-write measurements.
+## 10. Deterministic real-text training
 
-### 9.10 Memory, swap, and fallback
+Version 0.10 extends the persistent bounded runtime with a local UTF-8 byte-tokenizer frontend, corpus identity, deterministic train and validation windows, validation loss, greedy samples, and atomic progress records.
 
-- maximum RSS: `410,943,488` bytes;
-- sampled maximum MPS current allocation: `0` bytes;
-- maximum Metal driver allocation: `25,935,872` bytes;
-- swap delta: `0` bytes;
-- no unexpected thermal warning was reported;
-- no hidden fallback evidence was found;
-- no unsupported operator evidence was found;
-- no unexpected command failed.
+Accepted runtime commit:
 
-The zero sampled MPS current-allocation value is retained as reported. MPS availability, device selection, successful computation, and Metal driver activity were independently observed.
+```text
+8bc277123267c3d3f15bf60cd640819fa823d2e3
+```
 
-### 9.11 Accepted conclusion
+Package version: `0.10.0`.
 
-M4C is complete for the tested PyTorch MPS reference path.
+### 10.1 Protocol correction
+
+The external report classified the release as formal `FAIL` because its prompt expected:
+
+```text
+real-text micro parameter_count = 11,456
+```
+
+The checked commit correctly reported:
+
+```text
+real-text micro parameter_count = 18,624
+```
+
+The 18,624 count follows directly from the checked configuration:
+
+```text
+vocabulary size:              256
+maximum positional length:     64
+hidden size:                   32
+Transformer blocks:             1
+```
+
+The older 11,456 count belongs to the synthetic micro configuration with vocabulary size 64 and a shorter positional table. The validation mismatch was therefore a stale protocol expectation, not a runtime or planner defect.
+
+No training, integrity, numerical, fallback, or source-cleanliness gate failed because of this count. The target result is accepted as **PASS with a documented protocol correction**.
+
+### 10.2 Environment and project quality
+
+- MacBook Air with Apple M2;
+- 8 GB unified memory;
+- native arm64;
+- Rosetta translation value `0`;
+- Python 3.13.12;
+- PyTorch 2.13.0;
+- MPS built and available;
+- `PYTORCH_ENABLE_MPS_FALLBACK` unset;
+- exact commit and package version matched;
+- Ruff: PASS;
+- mypy: PASS;
+- pytest: PASS, 88 passed and 1 skipped;
+- compileall: PASS;
+- doctor: PASS;
+- bounded training CLI help: PASS;
+- real-text micro and small plans parsed successfully;
+- final `git status --short`: empty;
+- final `git diff --check`: clean.
+
+### 10.3 Data identity and tokenizer preflight
+
+- independent-process data identity matched exactly;
+- tokenizer version was `utf8-bytes-v1`;
+- token range was valid;
+- UTF-8 encode and decode round trip passed;
+- configured train and validation split identity was stable.
+
+### 10.4 Micro uninterrupted trajectory
+
+Configuration:
+
+```text
+parameters:          18,624
+Transformer blocks: 1
+hidden size:         32
+vocabulary:          256
+sequence length:     32
+microbatch:          2
+```
+
+Result:
+
+```text
+classification: GREEN
+final step:      20
+learning signal: LEARNING_SIGNAL_GREEN
+```
+
+Validation loss:
+
+```text
+step 0:  5.548418998718262
+step 20: 3.302267074584961
+```
+
+Lineage and progress records were contiguous for steps 0 through 20. Bundle IDs matched the corresponding progress records.
+
+### 10.5 Process restart and resume
+
+A separate root executed:
+
+```text
+process 1: step 0 -> step 5
+process exit
+process 2: step 5 -> step 20
+```
+
+Both phases were GREEN. The second phase reported `resumed=true` and executed 15 new optimizer steps.
+
+Uninterrupted versus resumed comparison:
+
+```text
+classification: NUMERICALLY_STABLE
+names equal: true
+structures equal: true
+all values finite: true
+maximum absolute difference: 1.1920928955078125e-07
+mean absolute difference:    8.844825718731097e-10
+```
+
+The relative worst case occurred in a near-zero Adam first-moment value and is reported with the absolute metrics.
+
+Equivalent properties:
+
+- steps;
+- batch cursors;
+- seeds;
+- byte offsets;
+- batch checksums;
+- training-loss trajectory within tolerance;
+- validation-loss trajectory within tolerance;
+- gradient norms within tolerance;
+- clipping coefficients within tolerance;
+- sample token IDs;
+- decoded sample completion.
+
+Candidate-versus-restored state was exact.
+
+### 10.6 Corpus mutation rejection
+
+The harness copied the corpus and configuration outside the repository, completed step 2, changed the copied corpus bytes, and attempted resume.
+
+Result:
+
+```text
+PASS_CORPUS_MUTATION_REJECTED
+exception: ResumeConfigurationError
+mismatch: data_identity
+current authoritative step: 2
+step 3 published: false
+```
+
+The root verified and recovered after rejection.
+
+### 10.7 Small real-text trajectory
+
+Configuration:
+
+```text
+parameters:          1,846,656
+Transformer blocks: 4
+hidden size:         192
+vocabulary:          256
+sequence length:     128
+microbatch:          1
+```
+
+Result:
+
+```text
+classification: GREEN
+final step:      10
+learning signal: LEARNING_SIGNAL_GREEN
+```
+
+Validation loss:
+
+```text
+step 0:  5.687370777130127
+step 10: 4.083975553512573
+```
+
+Numerical comparison with resident replay:
+
+- maximum loss difference: `0.0`;
+- maximum gradient-norm difference: `1.639226772098823e-07`;
+- maximum final-state absolute difference: `1.1920928955078125e-07`;
+- mean final-state absolute difference: `1.2758380908789405e-10`;
+- candidate-versus-restored exact bytes: true;
+- all values finite.
+
+Lineage and progress records were contiguous for steps 0 through 10.
+
+### 10.8 Storage and resource observations
+
+Micro root:
+
+- directory size: `25,805,954` bytes;
+- current parameter tensors: `12`;
+- current gradient tensors: `12`;
+- current optimizer tensors: `37`;
+- maximum process RSS: `318,963,712` bytes;
+- maximum recorded accelerator allocation: `20,152,320` bytes;
+- validation time total: about `11.86` seconds.
+
+Small root:
+
+- directory size: `631,729,632` bytes;
+- current parameter tensors: `36`;
+- current gradient tensors: `36`;
+- current optimizer tensors: `109`;
+- maximum process RSS: `393,314,304` bytes;
+- maximum recorded accelerator allocation: `62,586,880` bytes;
+- validation time total: about `4.30` seconds.
+
+The small scenario consumed substantial storage because every historical candidate and work store was retained. Free filesystem storage fell from about 7.20 GiB before installation to about 3.67 GiB after the small run.
+
+This is evidence that pruning and compaction should precede much longer real-data trajectories.
+
+Application byte counters are not NAND-level SSD-write measurements. APFS amplification, page cache, and controller behavior remain outside those counters.
+
+### 10.9 Fallback and source integrity
+
+The first scanner pass produced textual false positives because substrings such as `nan` appeared inside ordinary words and because the environment key `PYTORCH_ENABLE_MPS_FALLBACK` was present with a null value.
+
+After audit:
+
+- no actual runtime fallback evidence remained;
+- no unsupported operator evidence remained;
+- no non-finite tensor or loss evidence remained;
+- no unexpected command failed;
+- the MPS fallback environment variable remained unset;
+- final source state was clean.
+
+### 10.10 Accepted conclusion
+
+M5 is complete for the tested PyTorch MPS reference path.
 
 The accepted evidence establishes:
 
 ```text
-persistent step 0
-    -> bounded step 1
-    -> bounded step 2
+local UTF-8 corpus
+    -> checksummed data identity
+    -> deterministic windows and offsets
+    -> bounded full-parameter training
+    -> validation loss and samples
     -> process exit
-    -> reopen CURRENT
-    -> bounded step 3
-    -> bounded step 4
-    -> bounded step 5
+    -> deterministic resume
+    -> numerically stable final state
+    -> corpus mutation rejection
 ```
 
-with exact uninterrupted-versus-resumed final state, correct Adam continuity, deterministic batch provenance, contiguous root lineage, later-step atomicity, integrity rejection, and clean source state.
+It demonstrates a real-text learning signal for the micro and 1.85M-parameter workloads. It does not establish production model quality, activation-bounded execution, direct-I/O or NVMe-specific behavior, bounded MLX optimization, pruning, or training state larger than unified memory.
 
-It does not establish real-corpus training, activation-bounded execution, bounded MLX optimization, or training state larger than unified memory.
-
-## 10. Milestone status
+## 11. Milestone status
 
 | Milestone | Status |
 |---|---|
@@ -557,46 +625,49 @@ It does not establish real-corpus training, activation-bounded execution, bounde
 | M4B2. Bounded backward and gradient store | Completed and validated on M2 |
 | M4B3. Streamed AdamW and atomic step publication | Completed and validated on M2 |
 | M4C. Consecutive bounded steps, checkpoint, and resume | Completed and validated on M2 |
-| M5. Small real-corpus training frontend | Next milestone |
-| Activation recomputation and strict runtime budgets | Not started |
+| M5. Deterministic small real-corpus frontend | Completed and validated on M2 |
+| M6A. Historical-state pruning and compaction | Next |
+| M6B. Activation recomputation and strict runtime budgets | Not started |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
 | Bounded MLX optimizer execution | Not started |
 | 124M and 350M capacity demonstrations | Not started |
 
-## 11. Current evidence boundary
+## 12. Current evidence boundary
 
 The accepted evidence does not establish:
 
-- real tokenizer and corpus training;
-- persisted real-dataset shard, sample, epoch, shuffle, and tokenizer state;
+- a representative tokenizer or production corpus;
+- production model quality;
+- large sharded dataset state, epochs, and shuffle semantics;
 - activation recomputation from storage or activation offload;
 - bounded activation and workspace residency;
 - strict total-memory-pressure enforcement;
 - asynchronous storage overlap;
 - intra-layer tiling;
 - bounded MLX backward or optimizer execution;
+- direct-I/O or NVMe-specific performance behavior;
 - storage pruning or compaction;
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target machine.
 
-No full out-of-core, model-quality, throughput-at-scale, or model-capacity claim is made yet.
+No full out-of-core, production model-quality, throughput-at-scale, or model-capacity claim is made yet.
 
-## 12. Next engineering gate
+## 13. Next engineering gate
 
-The next functional milestone is a small real-text training frontend.
+The next engineering gate should combine two closely related requirements:
 
-It must:
+1. **Historical-state pruning and compaction**
+   - retain the current root and a declared number of recovery checkpoints;
+   - identify reachable and unreachable child stores;
+   - delete only state that is no longer referenced by retained roots;
+   - preserve atomic recovery and integrity guarantees;
+   - report reclaimed bytes and cumulative writes.
 
-1. introduce a tokenizer and immutable tokenizer identity;
-2. identify the corpus and exact preprocessing recipe;
-3. persist shard, sample, epoch, and shuffle position transactionally;
-4. preserve deterministic resume across process restart;
-5. report training loss and validation loss;
-6. generate sample text from checkpoints;
-7. keep the existing root-bundle authority and configuration-digest rules;
-8. compare uninterrupted and resumed trajectories;
-9. use micro or few-million-parameter workloads for fast iteration;
-10. keep activation-memory and larger-than-resident claims explicitly out of scope until separately validated.
+2. **Activation recomputation and strict runtime budgets**
+   - stop retaining all boundary activations for the entire step;
+   - choose which activations to retain, recompute, or store;
+   - enforce activation and workspace budgets in addition to parameter, gradient, and optimizer budgets;
+   - verify numerical behavior against the current synchronous reference path.
 
-A future external training project may provide the frontend, but it must consume the established storage, checkpoint, lineage, and resume contracts rather than bypass them.
+A larger or external training frontend can be integrated after it consumes the established tensor, checkpoint, lineage, data-identity, progress, and resume contracts rather than bypassing them.

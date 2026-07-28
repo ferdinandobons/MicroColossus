@@ -1,10 +1,10 @@
 # Deterministic Real-Text Training
 
-This document records the MicroColossus 0.10 design for training on local UTF-8 text while preserving the bounded execution, versioned state, atomic checkpoint, and process-resume contracts validated in 0.9.
+This document records the MicroColossus 0.10 design and accepted Apple M2 evidence for training on local UTF-8 text while preserving the bounded execution, versioned state, atomic checkpoint, and process-resume contracts validated in earlier releases.
 
 ## 1. Scope
 
-Version 0.10 adds a first real-data frontend. It is deliberately small and dependency-free so runtime correctness can be verified before integrating large corpora or external tokenizer libraries.
+Version 0.10 adds the first real-data frontend. It is deliberately small and dependency-free so runtime correctness can be verified before integrating large corpora or external tokenizer libraries.
 
 The first implementation supports:
 
@@ -19,7 +19,7 @@ The first implementation supports:
 - corpus and tokenizer identity in persistent training metadata;
 - process restart and resume without changing the data trajectory.
 
-It does not yet establish model quality, large-corpus throughput, activation-bounded execution, or training state larger than unified memory.
+It does not establish production model quality, large-corpus throughput, activation-bounded execution, or training state larger than unified memory.
 
 ## 2. Byte tokenizer
 
@@ -188,63 +188,140 @@ Relative corpus paths are resolved from the experiment YAML directory.
 
 ### 10.1 `examples/real-text-micro.yaml`
 
-- 11,456 parameters;
+- 18,624 parameters;
+- byte vocabulary of 256 tokens;
+- maximum positional table length 64;
 - one Transformer block;
-- sequence length 32;
+- training sequence length 32;
 - microbatch 2;
 - evaluation every committed step;
-- intended for CI, exact CPU comparison, resume tests, and fast MPS diagnostics.
+- intended for CI, CPU comparison, resume tests, and fast MPS diagnostics.
+
+The older 11,456-parameter count belongs to the synthetic micro configuration with vocabulary size 64 and a shorter positional table. It does not apply to the real-text byte-tokenizer configuration.
 
 ### 10.2 `examples/real-text-small.yaml`
 
-- approximately 1.85 million parameters;
+- 1,846,656 parameters;
 - four Transformer blocks;
 - hidden size 192;
 - sequence length 128;
 - evaluation every ten committed steps;
-- intended for the first meaningful Apple M2 learning-trajectory experiment after the micro gate passes.
+- intended for the first meaningful Apple M2 real-text learning trajectory.
 
 The included corpus is original project text. It is a reproducible engineering fixture, not a representative language-model dataset.
 
-## 11. Validation plan
+## 11. Accepted Apple M2 validation
 
-CPU CI requires:
+Accepted runtime commit:
 
-- deterministic encoding, decoding, split, offsets, and checksums;
-- relative path resolution;
-- corpus identity changing when source bytes change;
-- modified corpus rejected on resume;
-- uninterrupted and resumed final state equality;
-- contiguous progress and root lineage;
-- validation loss and sample records tied to committed bundle IDs;
-- evaluation interval behavior;
-- resident loss changing on a repetitive real corpus;
-- all existing synthetic tests remaining valid.
+```text
+8bc277123267c3d3f15bf60cd640819fa823d2e3
+```
 
-The Apple Silicon gate will then verify:
+Package version:
 
-- native MPS execution with fallback disabled;
-- micro uninterrupted and process-resumed real-text trajectories;
-- exact or numerically stable final-state comparison;
-- validation-loss and sample determinism;
-- corpus mutation rejection;
-- root and child-store verification and recovery;
-- memory, swap, storage growth, and cumulative writes;
-- a short approximately 1.85M-parameter run only after the micro gate succeeds.
+```text
+0.10.0
+```
+
+The external report classified the release as formal `FAIL` only because its prompt expected the obsolete synthetic micro count of 11,456 parameters. The checked commit correctly planned 18,624 parameters for `real-text-micro.yaml`. The mismatch was in the validation protocol, not in the runtime or configuration. After correcting that protocol expectation, the target result is accepted as **PASS with a documented protocol correction**.
+
+### 11.1 Environment and quality gate
+
+- MacBook Air with Apple M2 and 8 GB unified memory;
+- native arm64 without Rosetta;
+- PyTorch 2.13.0 with MPS built and available;
+- `PYTORCH_ENABLE_MPS_FALLBACK` unset;
+- Ruff passed;
+- mypy passed;
+- pytest passed with 88 tests and 1 skip;
+- compileall passed;
+- doctor passed;
+- final `git status --short` was empty;
+- final `git diff --check` was clean.
+
+### 11.2 Data identity and tokenizer
+
+- independent-process data identity matched exactly;
+- tokenizer version was `utf8-bytes-v1`;
+- token range and UTF-8 round trip passed;
+- training cursors, seeds, offsets, and batch checksums matched between uninterrupted and resumed execution;
+- changed corpus bytes were rejected with `ResumeConfigurationError: data_identity` before step 3 could become authoritative.
+
+### 11.3 Micro real-text trajectory
+
+Uninterrupted training reached step 20 and was GREEN.
+
+Validation loss decreased from:
+
+```text
+step 0:  5.548418998718262
+step 20: 3.302267074584961
+```
+
+The learning-signal classification was `LEARNING_SIGNAL_GREEN`.
+
+A separate root trained from step 0 to step 5, exited, and resumed in a new process from step 5 to step 20. The comparison was `NUMERICALLY_STABLE`:
+
+```text
+maximum absolute state difference: 1.1920928955078125e-07
+mean absolute state difference:    8.844825718731097e-10
+all values finite:                 true
+names and structures equal:        true
+```
+
+Training-loss, validation-loss, gradient-norm, and clipping trajectories were close. Batch provenance, sample token IDs, and decoded sample completion were identical. Candidate-versus-restored state was exact at every inspected step.
+
+### 11.4 Small real-text trajectory
+
+The 1,846,656-parameter model reached step 10 and was GREEN.
+
+Validation loss decreased from:
+
+```text
+step 0:  5.687370777130127
+step 10: 4.083975553512573
+```
+
+The learning-signal classification was `LEARNING_SIGNAL_GREEN`.
+
+Final bounded-versus-resident state remained numerically close:
+
+```text
+maximum absolute difference: 1.1920928955078125e-07
+mean absolute difference:    1.2758380908789405e-10
+candidate restore exact:     true
+```
+
+### 11.5 Lineage, storage, and resources
+
+- micro lineage and progress records were contiguous from step 0 through step 20;
+- small lineage and progress records were contiguous from step 0 through step 10;
+- all root and referenced child stores verified and recovered;
+- micro training root size was `25,805,954` bytes;
+- small training root size was `631,729,632` bytes;
+- maximum recorded RSS was `393,314,304` bytes;
+- maximum recorded accelerator allocation was `62,586,880` bytes;
+- no runtime fallback, unsupported operator, non-finite value, or unexpected command failure remained after auditing scanner false positives;
+- free storage declined from about 7.20 GiB before installation to about 3.67 GiB after the small run because historical candidate and work stores are retained.
+
+Application byte counters are not NAND-level SSD-write measurements. Historical-state pruning and compaction were not implemented or tested.
 
 ## 12. Current boundary
 
-Version 0.10 does not yet provide:
+Version 0.10 does not provide or establish:
 
-- subword tokenization;
-- downloaded or sharded datasets;
+- a representative subword tokenizer;
+- a representative production corpus or model-quality result;
+- downloaded, large, or sharded datasets;
 - persisted epoch and shuffle state beyond the deterministic random-access cursor;
 - bounded validation or generation;
 - activation offload or recomputation;
+- strict total-memory-pressure enforcement;
 - asynchronous data or storage prefetch;
 - storage pruning or compaction;
 - bounded MLX training;
 - larger-than-memory training;
-- a model-quality claim.
+- 124M or 350M capacity demonstrations.
 
-The next accepted result must report both training behavior and runtime costs. A decreasing training loss alone is not sufficient without checkpoint, resume, numerical, memory, storage, and recovery evidence.
+The accepted result establishes a real-text learning trajectory, deterministic data provenance, process resume, numerical stability, and storage integrity for the tested micro and 1.85M-parameter workloads. It is not yet a full out-of-core or production model-quality result.

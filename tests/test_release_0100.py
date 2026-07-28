@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import microcolossus
 from microcolossus.bounded_training import (
     BATCH_STREAM_VERSION,
     BOUNDED_TRAINING_SCHEMA_VERSION,
     MULTI_STEP_RUNTIME_VERSION,
 )
+from microcolossus.config import load_experiment_config
 from microcolossus.data import (
     DATA_IDENTITY_SCHEMA_VERSION,
     TEXT_BATCH_STREAM_VERSION,
     UTF8_BYTE_TOKENIZER_VERSION,
 )
 from microcolossus.evaluation import EVALUATION_SCHEMA_VERSION, PROGRESS_SCHEMA_VERSION
+from microcolossus.model import DecoderOnlyTransformer
 
 
 def test_real_text_training_release_version_and_public_api() -> None:
@@ -28,3 +32,10 @@ def test_real_text_training_release_version_and_public_api() -> None:
     assert TEXT_BATCH_STREAM_VERSION == "utf8-byte-random-window-v1"
     assert EVALUATION_SCHEMA_VERSION == "microcolossus.evaluation.v1"
     assert PROGRESS_SCHEMA_VERSION == "microcolossus.training-progress.v1"
+
+
+def test_real_text_micro_example_parameter_count() -> None:
+    config = load_experiment_config(Path("examples/real-text-micro.yaml"))
+    assert config.model.vocab_size == 256
+    assert config.model.max_sequence_length == 64
+    assert DecoderOnlyTransformer(config.model).parameter_count == 18_624
