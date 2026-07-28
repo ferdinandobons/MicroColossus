@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .github/m6c-patch.b64 > /tmp/m6c.patch
+          base64 --decode .github/m6c-patch.b64 | gzip --decompress > /tmp/m6c.patch
           rm .github/m6c-patch.b64
           git apply /tmp/m6c.patch
           rm .github/workflows/apply-m6c-patch.yml
