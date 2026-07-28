@@ -2,17 +2,17 @@
 
 > **Trade memory for time.**
 
-MicroColossus is an experimental open-source runtime for full-parameter training when the complete managed training state cannot remain safely resident in available memory.
+MicroColossus is an experimental open-source runtime for full-parameter generative-model training when the complete managed training state cannot remain safely resident in available memory.
 
 The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 
 - **MLX** is the preferred optimized Apple Silicon execution candidate.
-- **PyTorch MPS** is the numerical oracle and reference for validation, debugging, state comparison, and recovery semantics.
-- Tensor storage, transactions, root checkpoints, data provenance, execution plans, and activation policies remain backend-neutral where practical.
+- **PyTorch MPS** is the numerical oracle and the reference for validation, debugging, state comparison, and recovery semantics.
+- Tensor storage, transactions, root checkpoints, data provenance, retention, and activation policies remain backend-neutral where practical.
 
-MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed gradient norm, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, and safe checkpoint pruning on the target M2.
+MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed global clipping, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, and safe checkpoint pruning on the target M2.
 
-Version **0.12.0** adds persistent multi-step activation recomputation. The CPU implementation and regression suite are the release gate before Apple M2 validation.
+Version **0.12.0** adds persistent multi-step activation recomputation. The CPU implementation and regression gate have passed. Native Apple M2 validation is the next required gate.
 
 ## Why Apple Silicon changes the design
 
@@ -21,10 +21,10 @@ Apple Silicon uses one unified physical memory pool. CPU tensors, accelerator te
 Project rules:
 
 - CPU-to-MPS placement is not capacity offload.
-- RSS, MPS, Metal-driver, and MLX allocator counters overlap or describe different scopes.
-- Those counters are never added as separate physical memories.
-- NVMe is the first capacity tier outside unified memory.
-- Memory pressure, swap, storage traffic, elapsed time, recovery, and cumulative writes are first-class metrics.
+- RSS, MPS, Metal-driver, and MLX counters describe overlapping or different scopes.
+- Those counters are never added as independent physical memories.
+- Storage is the first capacity tier outside unified memory.
+- Memory pressure, swap, storage traffic, elapsed time, recovery, replay, and cumulative writes are first-class metrics.
 
 ```text
 MLX or MPS active working set
@@ -45,59 +45,43 @@ versioned storage-backed tensor state
 - immutable manifests and atomic `CURRENT` publication;
 - transaction journals and conservative recovery;
 - corruption detection and storage or staging budgets;
-- PyTorch model and AdamW export and restore;
-- MLX model and optimizer-tree export and restore.
+- PyTorch model and AdamW export or restore;
+- MLX model and optimizer-tree export or restore.
 
-### One bounded optimizer step
+### Persistent bounded optimizer steps
 
 ```text
 parameter-group forward
-        ↓
+        |
 reverse group backward
-        ↓
+        |
 versioned final gradients
-        ↓
+        |
 streamed global norm and clipping
-        ↓
+        |
 group-bounded AdamW
-        ↓
+        |
 candidate parameter and optimizer stores
-        ↓
-exact restore validation
-        ↓
+        |
+restore and oracle comparison
+        |
 atomic root bundle publication
 ```
 
-The tied token embedding is:
+Every step consumes the parameter and Adam state referenced by the current root bundle. A later process can reopen the same directory and continue from `CURRENT`.
 
-- read once for embeddings and again for the final projection;
-- given both backward contributions;
-- updated exactly once by AdamW.
-
-### Persistent multi-step training
-
-```text
-bundle step 0
-    -> step 1
-    -> step 2
-    -> ...
-    -> step N
-```
-
-Every step consumes parameter and Adam state referenced by the current root bundle. A later process can reopen the same directory and continue from `CURRENT` without rebuilding state from initialization.
-
-The committed root step is the authoritative next-batch cursor. Configuration provenance, root lineage, batch checksums, tensor versions, optimizer steps, and data identity are verified on resume.
+The committed root step is the authoritative next-batch cursor. Configuration provenance, data identity, batch checksums, parent lineage, tensor versions, and optimizer steps are verified on resume.
 
 ### Activation policies
 
-Version 0.12 introduces:
+MicroColossus 0.12 supports:
 
 ```text
 training.activation_policy: retain_all
 training.activation_policy: recompute
 ```
 
-`retain_all` keeps every non-final forward boundary on CPU until its reverse group executes.
+`retain_all` keeps each non-final forward boundary on CPU until the matching reverse group executes.
 
 `recompute` keeps zero forward boundaries for later backward use. Each reverse group reconstructs its input by replaying the deterministic prefix from token IDs and the authoritative parameter store.
 
@@ -112,9 +96,9 @@ embedding backward
     use token IDs directly
 ```
 
-The first recomputation algorithm is synchronous and intentionally favors numerical isolation over throughput. It can replay a quadratic number of groups. Future hybrid policies will retain selected anchors based on measured memory and replay cost.
+The first recomputation schedule is synchronous and favors correctness and observability over throughput. Prefix replay can be quadratic in group count. A future hybrid policy will retain selected anchors from measured replay and memory curves.
 
-Separate logical budgets now cover:
+Separate logical budgets cover:
 
 - parameters;
 - gradients;
@@ -122,23 +106,22 @@ Separate logical budgets now cover:
 - retained activations;
 - local forward or backward workspace.
 
-The activation policy is part of checkpoint identity. A `retain_all` root cannot silently resume as `recompute`, or the reverse.
+The activation policy is part of checkpoint identity. A root cannot silently change policy at resume.
 
 ### Deterministic real-text frontend
 
-The current data frontend provides:
+The current frontend provides:
 
 - local UTF-8 corpus files;
-- a fixed byte tokenizer with vocabulary size 256;
+- tokenizer `utf8-bytes-v1` with vocabulary size 256;
 - checksummed train and validation identity;
 - deterministic split and random-access text windows;
 - byte offsets, seeds, and batch checksums;
 - validation loss at committed checkpoints;
 - deterministic greedy sample generation;
-- atomic progress records tied to root bundle IDs;
 - resume rejection when corpus bytes or declared data semantics change.
 
-The byte tokenizer is an engineering reference, not a final tokenizer for model quality.
+The byte tokenizer is an engineering reference, not a production tokenizer claim.
 
 ### Safe checkpoint pruning
 
@@ -157,24 +140,16 @@ explicit apply
     -> keep CURRENT byte-identical
 ```
 
-The retention policy can preserve:
-
-- `CURRENT`;
-- a declared number of previous checkpoints;
-- optional milestone checkpoints.
-
-All root bundle manifests remain as lightweight lineage metadata. Only selected checkpoints keep materialized parameter, optimizer, and gradient child stores.
-
 The corrected Apple M2/APFS validation demonstrated:
 
-- deterministic plans;
+- deterministic non-mutating plans;
 - byte-identical `CURRENT`;
-- safe interruption continuation;
+- interruption continuation and pre-journal retry;
 - idempotent repeated apply;
 - MPS resume after pruning;
-- micro reclamation of `10,739,392` managed bytes;
+- micro reclamation of `10,739,392` bytes;
 - small-model reclamation of `289,540,389` selected bytes;
-- no hidden CPU fallback or non-finite values;
+- no detected hidden CPU fallback or non-finite values;
 - clean source state.
 
 ## Accepted Apple M2 evidence
@@ -190,7 +165,7 @@ The corrected Apple M2/APFS validation demonstrated:
 | Persistent multi-step and process resume | PASS |
 | Deterministic real-text micro and 1.85M training | PASS |
 | Safe pruning and post-pruning resume | PASS |
-| Persistent activation recomputation | CPU gate in progress, M2 gate pending |
+| Persistent activation recomputation | CPU gate PASS. M2 gate pending |
 
 The controlled resident 23,213,056-parameter benchmark produced:
 
@@ -229,37 +204,20 @@ For native MLX benchmarks:
 python -m pip install -e ".[dev,benchmark]"
 ```
 
-## Run
-
-Inspect the target and static plan:
+## Environment and static plan
 
 ```bash
 microcolossus doctor
 microcolossus plan --config examples/real-text-micro-recompute.yaml
+microcolossus plan --config examples/real-text-small-recompute.yaml
 ```
 
-Persistent `retain_all` training:
-
-```bash
-microcolossus-bounded-train \
-  --config examples/real-text-micro.yaml \
-  --bundle-store runs/retain-all \
-  --target-step 5 \
-  --output runs/retain-all-step-5.json \
-  --device mps \
-  --parameter-working-set-mib 1 \
-  --gradient-working-set-mib 1 \
-  --optimizer-working-set-mib 4 \
-  --activation-working-set-mib 1 \
-  --workspace-working-set-mib 4
-```
-
-Persistent recomputation:
+## Persistent recomputation training
 
 ```bash
 microcolossus-bounded-train \
   --config examples/real-text-micro-recompute.yaml \
-  --bundle-store runs/recompute \
+  --bundle-store runs/recompute-training \
   --target-step 5 \
   --output runs/recompute-step-5.json \
   --device mps \
@@ -270,12 +228,12 @@ microcolossus-bounded-train \
   --workspace-working-set-mib 4
 ```
 
-Resume the same recomputation root:
+Resume the same root in a later process:
 
 ```bash
 microcolossus-bounded-train \
   --config examples/real-text-micro-recompute.yaml \
-  --bundle-store runs/recompute \
+  --bundle-store runs/recompute-training \
   --target-step 10 \
   --output runs/recompute-step-10.json \
   --device mps \
@@ -286,60 +244,44 @@ microcolossus-bounded-train \
   --workspace-working-set-mib 4
 ```
 
-Create and apply an explicit pruning plan:
+## Pruning
+
+Create a non-mutating plan:
 
 ```bash
 microcolossus-prune plan \
   --config examples/real-text-micro-recompute.yaml \
-  --bundle-store runs/recompute \
-  --output runs/recompute-pruning-plan.json
+  --bundle-store runs/recompute-training \
+  --output runs/pruning-plan.json
+```
 
+Inspect the plan, then apply it explicitly:
+
+```bash
 microcolossus-prune apply \
   --config examples/real-text-micro-recompute.yaml \
-  --bundle-store runs/recompute \
-  --plan runs/recompute-pruning-plan.json \
-  --output runs/recompute-pruning-report.json
+  --bundle-store runs/recompute-training \
+  --plan runs/pruning-plan.json \
+  --output runs/pruning-report.json
 ```
 
 ## Current boundary
 
 Not yet established:
 
-- accepted Apple M2 comparison of persistent `retain_all` and `recompute`;
-- hybrid activation-anchor scheduling;
+- Apple M2 validation of persistent activation recomputation;
+- hybrid activation anchors;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
+- strict total physical-memory-pressure enforcement;
 - direct-I/O or NVMe-specific performance behavior;
-- strict physical total-memory-pressure enforcement;
 - intra-layer tiling;
-- bounded MLX backward and optimizer execution;
+- bounded MLX backward or optimizer execution;
 - representative tokenizer or production corpus quality;
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target Mac.
 
-No complete out-of-core, performance-at-scale, or production model-quality claim is made.
-
-## Next engineering milestones
-
-1. validate persistent `retain_all` versus `recompute` on Apple M2;
-2. use measured replay and memory curves to implement hybrid activation anchors;
-3. add optional activation storage only after the synchronous reference remains correct;
-4. add intra-layer tiling for groups that individually exceed memory budgets;
-5. add performance overlap after correctness, recovery, and endurance remain stable.
-
-## Engineering policy
-
-An optimization is accepted only when it improves a declared objective without violating:
-
-- numerical correctness;
-- memory limits;
-- storage endurance;
-- stability;
-- recovery semantics;
-- reproducibility;
-- observability.
-
-Full-parameter training is reported separately from LoRA, QLoRA, quantized optimizer state, low-rank optimizers, and adapter training.
+No complete out-of-core, production-model-quality, throughput-at-scale, or larger-than-memory claim is made yet.
 
 ## Documentation
 
