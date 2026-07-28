@@ -10,7 +10,7 @@ The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 - **PyTorch MPS** is the numerical oracle and reference for validation, debugging, state comparison, and recovery semantics.
 - Tensor storage, transactions, root checkpoints, and execution plans remain backend-neutral.
 
-MicroColossus does not yet claim full out-of-core training or a state larger than unified memory. The project has validated recoverable storage-backed state, group-bounded forward, group-bounded backward, streamed gradient norm, group-bounded AdamW, and one atomic optimizer step on the target M2. Version 0.9 adds persistent consecutive steps and process resume for target-hardware validation.
+MicroColossus does not yet claim full out-of-core training or training state larger than unified memory. The project has now validated recoverable storage-backed state, group-bounded forward and backward, streamed gradient norm, group-bounded AdamW, atomic step publication, consecutive optimizer steps, and process-level checkpoint resume on the target M2.
 
 ## Why Apple Silicon changes the design
 
@@ -93,7 +93,7 @@ parameter
 + optimizer step tensor
 ```
 
-It applies one canonical clipping coefficient, executes AdamW, writes candidate parameter and optimizer stores, verifies the candidate, restores it exactly, and publishes a root step bundle only after every child store is valid.
+It applies one canonical clipping coefficient, executes AdamW, writes candidate parameter and optimizer stores, verifies the candidate, restores it, and publishes a root step bundle only after every child store is valid.
 
 The tied token embedding is updated exactly once using its final accumulated gradient.
 
@@ -122,7 +122,7 @@ next batch cursor = current committed step
 
 A changed model, optimizer recipe, sequence length, microbatch, seed, clipping policy, or schedule is rejected on resume.
 
-## Validated Apple M2 evidence
+## Accepted Apple M2 evidence
 
 ### Resident training
 
@@ -144,7 +144,7 @@ A controlled 23,213,056-parameter workload produced:
 
 The backend decision remains **dual backend**. MLX is the preferred optimized Apple Silicon candidate. PyTorch remains the numerical oracle.
 
-### Storage and bounded execution
+### Storage and bounded execution through 0.8
 
 Clean target runs on the 8 GB M2 validated:
 
@@ -157,11 +157,56 @@ Clean target runs on the 8 GB M2 validated:
 - group-bounded AdamW;
 - exact candidate-versus-resident and candidate-versus-restored state;
 - atomic bundle step 0 to step 1;
-- failure before manifest or root pointer publication preserving step 0;
+- failure before manifest or root pointer publication preserving the prior step;
 - parameter, gradient, and optimizer working-set rejection;
 - no detected hidden CPU fallback or non-finite values.
 
-The accepted 0.8 target result used commit `ef88198d66f1d1795ffa14dcb6db388ae1715e85`.
+### Persistent multi-step validation in 0.9
+
+A clean target run validated version 0.9.0 at commit:
+
+```text
+4b1ffb20857dd948d7737484e62b007f24bf69b9
+```
+
+Environment and quality gate:
+
+- MacBook Air with Apple M2 and 8 GB unified memory;
+- native arm64 without Rosetta;
+- PyTorch 2.13.0 with MPS built and available;
+- Ruff passed;
+- mypy passed over 33 source files;
+- 80 tests passed with one skip;
+- compileall passed;
+- fallback remained disabled;
+- the source tree remained clean.
+
+Accepted runtime results:
+
+- micro uninterrupted training from step 0 to step 5: GREEN;
+- micro training from step 0 to step 2: GREEN;
+- a new process resumed the same root from step 2 to step 5: GREEN;
+- uninterrupted and resumed final canonical states: BITWISE_EXACT;
+- tiny training from step 0 to step 3: GREEN;
+- micro lineage: `[0, 1, 2, 3, 4, 5]`;
+- tiny lineage: `[0, 1, 2, 3]`;
+- deterministic cursor, seed, and batch-checksum equivalence: true;
+- all final micro optimizer step tensors: `5.0`;
+- all final tiny optimizer step tensors: `3.0`;
+- maximum per-step loss difference: `0.0`;
+- maximum per-step gradient-norm difference: `1.6985336648289717e-07`;
+- maximum final bounded-versus-resident absolute difference: `7.450580596923828e-09`;
+- mean final bounded-versus-resident absolute difference: `1.0105799101017887e-10`;
+- candidate restore exactness: true;
+- both later-step publication failures preserved authoritative step 2;
+- configuration mismatch was rejected;
+- corrupt current child state was detected;
+- parameter, gradient, and optimizer budget rejections passed;
+- root and referenced child stores verified and recovered;
+- swap delta was zero;
+- no hidden fallback or unsupported operation was detected.
+
+Observed maxima were `410,943,488` bytes RSS and `25,935,872` bytes Metal driver allocation. The sampled MPS current-allocation counter reported zero and is retained as reported. It is not treated as evidence that MPS execution did not occur.
 
 ## Development scale ladder
 
@@ -253,10 +298,10 @@ microcolossus-bounded-train \
 
 Not yet established:
 
-- clean M2 validation of version 0.9 multi-step and resume;
 - real tokenizer and corpus training;
-- persisted real-dataset shard, sample, epoch, and shuffle state;
+- persisted real-dataset shard, sample, epoch, shuffle, and tokenizer state;
 - activation recomputation from storage or activation offload;
+- strict total-memory-pressure enforcement;
 - asynchronous prefetch and writeback;
 - intra-layer tiling;
 - bounded MLX backward and optimizer execution;
@@ -266,6 +311,12 @@ Not yet established:
 - 124M or 350M full-parameter training on the target Mac.
 
 No full out-of-core, performance-at-scale, or model-quality claim is made yet.
+
+## Next engineering milestone
+
+The next functional gate is a small real-text training frontend. It must preserve the established transactional checkpoint contract while adding tokenizer provenance, dataset identity, deterministic shard and sample position, validation loss, checkpoint resume, and sample generation.
+
+Activation-memory management and larger-than-resident capacity demonstrations remain later milestones.
 
 ## Engineering policy
 
