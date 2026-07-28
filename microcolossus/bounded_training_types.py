@@ -31,15 +31,26 @@ class PersistentStepResult:
     candidate_optimizer_store_path: str
     oracle_state_store_path: str
     bounded_backward_result_path: str
+    activation_policy: str
     parameter_working_set_budget_bytes: int
     gradient_working_set_budget_bytes: int
     optimizer_working_set_budget_bytes: int
+    activation_working_set_budget_bytes: int
+    workspace_working_set_budget_bytes: int
     maximum_parameter_group_bytes: int
     maximum_gradient_group_bytes: int
     maximum_optimizer_group_bytes: int
+    maximum_retained_activation_bytes: int
+    maximum_workspace_bytes: int
+    retained_forward_boundary_count: int
+    retained_forward_boundary_bytes: int
+    total_prefix_replayed_groups: int
+    total_prefix_recomputation_seconds: float
     parameter_budget_respected: bool
     gradient_budget_respected: bool
     optimizer_budget_respected: bool
+    activation_budget_respected: bool
+    workspace_budget_respected: bool
     resident_loss: float
     bounded_loss: float
     loss_absolute_difference: float
@@ -82,6 +93,9 @@ class BoundedTrainingResult:
     resumed: bool
     initialized_bundle_id: str
     initialization_publication: BundlePublicationTelemetry | None
+    activation_policy: str
+    activation_working_set_budget_bytes: int
+    workspace_working_set_budget_bytes: int
     steps: tuple[PersistentStepResult, ...]
     lineage: tuple[BundleLineageEntry, ...]
     progress_records: tuple[TrainingProgressRecord, ...]
@@ -91,6 +105,11 @@ class BoundedTrainingResult:
     final_bundle_vs_restored_state: StateComparison
     final_batch_cursor: int
     optimizer_step_values: tuple[tuple[str, float], ...]
+    maximum_retained_activation_bytes: int
+    maximum_workspace_bytes: int
+    maximum_retained_forward_boundary_bytes: int
+    total_prefix_replayed_groups: int
+    total_prefix_recomputation_seconds: float
     total_parameter_logical_bytes_read: int
     total_gradient_logical_bytes_read: int
     total_optimizer_logical_bytes_read: int
