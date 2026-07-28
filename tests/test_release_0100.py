@@ -4,6 +4,7 @@ from pathlib import Path
 
 import microcolossus
 from microcolossus.bounded_training import (
+    ACTIVATION_RECOMPUTE_RUNTIME_VERSION,
     BATCH_STREAM_VERSION,
     BOUNDED_TRAINING_SCHEMA_VERSION,
     MULTI_STEP_RUNTIME_VERSION,
@@ -24,16 +25,18 @@ from microcolossus.pruning import (
 
 
 def test_real_text_training_release_version_and_public_api() -> None:
-    assert microcolossus.__version__ == "0.11.0"
+    assert microcolossus.__version__ == "0.12.0"
     assert callable(microcolossus.run_bounded_training)
+    assert callable(microcolossus.run_activation_recompute_validation)
     assert callable(microcolossus.prepare_data_source)
     assert callable(microcolossus.build_pruning_plan)
     assert callable(microcolossus.apply_pruning_plan)
     assert microcolossus.DataConfig.__name__ == "DataConfig"
     assert microcolossus.EvaluationResult.__name__ == "EvaluationResult"
     assert microcolossus.RetentionConfig.__name__ == "RetentionConfig"
-    assert BOUNDED_TRAINING_SCHEMA_VERSION == "microcolossus.bounded-training.v2"
+    assert BOUNDED_TRAINING_SCHEMA_VERSION == "microcolossus.bounded-training.v3"
     assert MULTI_STEP_RUNTIME_VERSION == "0.10.0"
+    assert ACTIVATION_RECOMPUTE_RUNTIME_VERSION == "0.12.0"
     assert BATCH_STREAM_VERSION == "configured-data-source-v1"
     assert DATA_IDENTITY_SCHEMA_VERSION == "microcolossus.data-identity.v1"
     assert UTF8_BYTE_TOKENIZER_VERSION == "utf8-bytes-v1"
