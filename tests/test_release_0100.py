@@ -4,7 +4,6 @@ from pathlib import Path
 
 import microcolossus
 from microcolossus.bounded_training import (
-    ACTIVATION_RECOMPUTE_RUNTIME_VERSION,
     BATCH_STREAM_VERSION,
     BOUNDED_TRAINING_SCHEMA_VERSION,
     MULTI_STEP_RUNTIME_VERSION,
@@ -22,6 +21,7 @@ from microcolossus.pruning import (
     PRUNING_PLAN_SCHEMA_VERSION,
     PRUNING_REPORT_SCHEMA_VERSION,
 )
+from microcolossus.training_checkpoint import ACTIVATION_RECOMPUTE_RUNTIME_VERSION
 
 
 def test_real_text_training_release_version_and_public_api() -> None:
