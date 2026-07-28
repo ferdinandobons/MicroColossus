@@ -12,7 +12,7 @@ The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 
 MicroColossus does not yet claim full out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed gradient norm, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level checkpoint resume, and a deterministic real-text learning trajectory on the target M2.
 
-Version **0.10.0** adds the first deterministic local real-text frontend and is accepted on Apple M2 with a documented validation-protocol correction.
+Version **0.11.0** adds explicit safe pruning and checkpoint compaction. The CPU implementation is complete. Clean Apple M2 filesystem validation remains required before the pruning milestone is accepted as target evidence.
 
 ## Why Apple Silicon changes the design
 
@@ -90,7 +90,7 @@ The committed root step is the authoritative next-batch cursor. Configuration pr
 
 ### Deterministic real-text frontend
 
-Version 0.10 introduces:
+Version 0.10 introduced:
 
 - local UTF-8 corpus files;
 - a fixed byte tokenizer with vocabulary size 256;
@@ -104,6 +104,33 @@ Version 0.10 introduces:
 - resume rejection when corpus bytes or declared data semantics change.
 
 The first tokenizer is deliberately simple. It removes external vocabulary and download dependencies while the storage and resume semantics are validated. It is not presented as the final tokenizer for model quality.
+
+### Safe checkpoint pruning
+
+Version 0.11 introduces an explicit two-stage workflow:
+
+```text
+dry-run plan
+    -> verify CURRENT and retained checkpoints
+    -> inventory exact deletion targets
+    -> checksum the plan
+
+explicit apply
+    -> publish operation journal
+    -> delete only proven-unreachable state
+    -> verify retained state
+    -> keep CURRENT byte-identical
+```
+
+The retention policy can keep:
+
+- `CURRENT`;
+- a configured number of immediately previous checkpoints;
+- optional milestone checkpoints at a fixed interval.
+
+All root bundle manifests remain as lightweight lineage metadata. Only selected retained checkpoints keep their parameter, optimizer, and gradient child stores. A historical checkpoint whose child state was pruned cannot be restored later merely by changing the retention policy.
+
+Pruning is conservative and manual by default. There is no automatic background deletion in version 0.11.
 
 ## Accepted Apple M2 evidence
 
@@ -190,15 +217,15 @@ Accepted target results after correcting that protocol expectation:
 - no runtime fallback, unsupported operation, non-finite value, or unexpected command failure remained after scanner audit;
 - final source tree was clean.
 
-The small training root occupied about 632 MB because historical candidates and work stores are retained. Pruning and compaction remain a required engineering milestone.
+The small training root occupied about 632 MB after ten steps because historical candidates and work stores were retained. That result motivated the 0.11 pruning milestone.
 
 ## Development scale ladder
 
 1. **Unit scale**. Bytes, tensors, operators, corruption, and failure injection.
 2. **Synthetic micro model**. 11,456 parameters for fast storage and numerical paths.
-3. **Real-text micro model**. 18,624 parameters for tokenizer, data provenance, validation, samples, and resume.
+3. **Real-text micro model**. 18,624 parameters for tokenizer, data provenance, validation, samples, resume, and pruning diagnostics.
 4. **Tiny model**. 443,648 parameters for target-hardware numerical gates.
-5. **Small real model**. Approximately 1M to 5M parameters for a real learning trajectory.
+5. **Small real model**. Approximately 1M to 5M parameters for a real learning trajectory and filesystem reclamation gate.
 6. **Milestone scale**. Larger workloads after the same path is correct at smaller scales.
 7. **Capacity demonstrations**. 124M, 350M, and later targets after activation and tiling work.
 
@@ -206,8 +233,8 @@ Included real-text examples:
 
 | Configuration | Parameters | Purpose |
 |---|---:|---|
-| `examples/real-text-micro.yaml` | 18,624 | deterministic resume, validation, samples, and fast MPS diagnostics |
-| `examples/real-text-small.yaml` | 1,846,656 | first meaningful Apple M2 real-text trajectory |
+| `examples/real-text-micro.yaml` | 18,624 | deterministic resume, validation, samples, and fast pruning diagnostics |
+| `examples/real-text-small.yaml` | 1,846,656 | first meaningful Apple M2 real-text and storage-reclamation trajectory |
 
 The included corpus is original project text used as an engineering fixture. It is not a representative language-model dataset.
 
@@ -273,29 +300,53 @@ Progress records are written under:
 runs/real-text-training/metrics/
 ```
 
-## Version 0.10 validation status
+Create a non-mutating pruning plan:
 
-Completed and accepted on the target M2:
+```bash
+microcolossus-prune plan \
+  --config examples/real-text-micro.yaml \
+  --bundle-store runs/real-text-training \
+  --output runs/pruning-plan.json
+```
 
-- byte tokenizer and local corpus identity;
-- deterministic split and training windows;
-- real-text bounded training and process resume;
-- validation loss and deterministic samples;
-- progress records linked to root lineage;
-- corpus mutation rejection;
-- CPU unit and end-to-end gates;
-- Python 3.11 and 3.13 CI coverage;
-- micro step 0 to 20;
-- process restart and resume from step 5 to step 20;
-- 1.85M-parameter small step 0 to 10;
-- target store verification and recovery;
-- numerical comparison with resident replay;
-- clean source-tree verification.
+Inspect the plan, then apply it explicitly:
+
+```bash
+microcolossus-prune apply \
+  --config examples/real-text-micro.yaml \
+  --bundle-store runs/real-text-training \
+  --plan runs/pruning-plan.json \
+  --output runs/pruning-report.json
+```
+
+## Version 0.11 validation status
+
+Implemented in CPU paths:
+
+- retention policy parsing;
+- deterministic and non-mutating dry-run plans;
+- exact deletion-target inventories and plan checksums;
+- explicit apply with atomic journal;
+- byte-identical `CURRENT` invariant;
+- pre- and post-deletion retained-checkpoint verification;
+- candidate, work, oracle, temporary, orphan, and unpublished-state removal;
+- interruption recovery;
+- idempotent repeated apply;
+- resume after pruning;
+- corruption rejection for retained state;
+- training exclusion while pruning owns the root;
+- Python 3.11 and 3.13 CI coverage.
+
+The release is not accepted as target evidence until a clean Apple M2 filesystem protocol confirms material reclamation and post-pruning resume.
 
 ## Current boundary
 
 Not yet established:
 
+- accepted Apple M2 validation of pruning and compaction;
+- live chunk repacking across retained stores;
+- deduplication across independent store directories;
+- automatic periodic pruning;
 - representative tokenizer or corpus quality;
 - production model quality;
 - persisted large-dataset shards, epochs, and shuffle state;
@@ -304,20 +355,17 @@ Not yet established:
 - asynchronous prefetch and writeback;
 - intra-layer tiling;
 - bounded MLX backward and optimizer execution;
-- storage pruning and compaction;
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target Mac.
 
 No full out-of-core, performance-at-scale, or production model-quality claim is made yet.
 
-## Next engineering milestone
+## Next engineering milestones
 
-The next work should prioritize:
-
-1. historical-state pruning and compaction so longer trajectories do not consume storage linearly;
-2. activation recomputation, optional activation offload, and strict total-memory-pressure budgets;
-3. a larger and more representative corpus and tokenizer adapter after runtime semantics remain stable;
-4. performance work only after the synchronous reference path stays numerically and transactionally correct.
+1. validate pruning and resume on the target Apple M2 filesystem;
+2. implement activation recomputation, optional activation offload, and strict total-memory-pressure budgets;
+3. add a larger and more representative corpus and tokenizer adapter after runtime semantics remain stable;
+4. add performance overlap only after the synchronous reference path stays numerically and transactionally correct.
 
 ## Engineering policy
 
@@ -339,6 +387,7 @@ Full-parameter training is reported separately from LoRA, QLoRA, low-rank optimi
 - [`docs/storage.md`](docs/storage.md)
 - [`docs/multistep.md`](docs/multistep.md)
 - [`docs/real-text.md`](docs/real-text.md)
+- [`docs/pruning.md`](docs/pruning.md)
 - [`docs/validation.md`](docs/validation.md)
 - [`docs/competitive.md`](docs/competitive.md)
 

@@ -26,12 +26,26 @@ from .config import (
     ExperimentConfig,
     HardwareBudget,
     ModelConfig,
+    RetentionConfig,
     TrainingConfig,
 )
 from .data import DataIdentity, LanguageModelBatch, prepare_data_source
 from .evaluation import EvaluationResult, TrainingProgressRecord
 from .model import DecoderOnlyTransformer
 from .planner import MemoryPlan, build_static_plan
+from .pruning import (
+    PruningFailurePoint,
+    PruningInProgressError,
+    PruningPathRecord,
+    PruningPlan,
+    PruningReport,
+    PruningSimulatedCrash,
+    apply_pruning_plan,
+    build_pruning_plan,
+    load_pruning_plan,
+    write_pruning_plan,
+    write_pruning_report,
+)
 from .step_bundle import StepBundleStore
 from .storage import StoreLimits, VersionedTensorStore
 from .storage_training import StorageBackedStepResult, run_observable_storage_step
@@ -53,7 +67,14 @@ __all__ = [
     "MemoryPlan",
     "ModelConfig",
     "OptimizerWorkingSetExceededError",
+    "PruningFailurePoint",
+    "PruningInProgressError",
+    "PruningPathRecord",
+    "PruningPlan",
+    "PruningReport",
+    "PruningSimulatedCrash",
     "ResumeConfigurationError",
+    "RetentionConfig",
     "StepBundleStore",
     "StorageBackedStepResult",
     "StoreLimits",
@@ -61,13 +82,18 @@ __all__ = [
     "TrainingProgressRecord",
     "VersionedTensorStore",
     "WorkingSetExceededError",
+    "apply_pruning_plan",
+    "build_pruning_plan",
     "build_static_plan",
+    "load_pruning_plan",
     "prepare_data_source",
     "run_bounded_backward",
     "run_bounded_forward",
     "run_bounded_optimizer_step",
     "run_bounded_training",
     "run_observable_storage_step",
+    "write_pruning_plan",
+    "write_pruning_report",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"

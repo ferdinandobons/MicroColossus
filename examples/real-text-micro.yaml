@@ -38,6 +38,10 @@ evaluation:
   sample_prompt: "The workshop "
   generation: greedy-v1
 
+retention:
+  keep_previous: 2
+  milestone_interval: 5
+
 hardware:
   accelerator_memory_gib: 1.0
   process_ram_gib: 1.0
