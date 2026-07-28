@@ -1,16 +1,14 @@
 """Synchronous activation-recomputation reference for bounded backward execution.
 
-This module intentionally keeps the existing retain-all bounded backward path as
-its numerical oracle.  The recomputation path retains no forward boundary
-activations.  During reverse execution it replays the deterministic prefix
-needed to reconstruct one local group input, performs that group's backward,
-then releases the reconstructed activation and parameters.
+The established bounded backward path retains every forward boundary on CPU.
+This module provides the first M6B reference path: the forward retains no
+boundary activation, and each reverse group deterministically replays the
+prefix required to reconstruct its local input.
 """
 
 from __future__ import annotations
 
 import gc
-import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,6 +19,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from .bounded_backward import (
+    GradientWorkingSetExceededError,
     _batch_checksum,
     _commit_group_gradients,
     _enable_parameter_gradients,
@@ -65,11 +64,11 @@ ACTIVATION_RECOMPUTE_SCHEMA_VERSION = "microcolossus.activation-recompute.v1"
 
 
 class ActivationWorkingSetExceededError(RuntimeError):
-    """Raised when one retained activation or activation gradient exceeds budget."""
+    """Raised when a retained activation working set exceeds its budget."""
 
 
 class WorkspaceWorkingSetExceededError(RuntimeError):
-    """Raised when one local recomputation workspace exceeds budget."""
+    """Raised when a local recomputation workspace exceeds its budget."""
 
 
 @dataclass(frozen=True)
@@ -238,7 +237,7 @@ def _forward_without_retained_boundaries(
     parameter_working_set_bytes: int,
     workspace_working_set_bytes: int,
 ) -> tuple[float, tuple[ActivationForwardGroupMetrics, ...], int]:
-    """Execute one forward while retaining only the currently active hidden state."""
+    """Execute a group forward while retaining no later-backward boundary."""
 
     hidden_states: Tensor | None = None
     metrics: list[ActivationForwardGroupMetrics] = []
@@ -292,12 +291,17 @@ def _forward_without_retained_boundaries(
             )
             maximum_workspace = max(maximum_workspace, workspace_bytes)
             output_cpu = output.detach().cpu().contiguous()
+            output_checksum = tensor_checksum(output_cpu)
             memory = accelerator_memory_metrics(device)
             process_rss = process_rss_bytes()
 
             release_started = time.perf_counter()
             del tensors, output_cpu
             if spec.name == "final-head":
+                previous_hidden = hidden_states
+                hidden_states = None
+                if previous_hidden is not None:
+                    del previous_hidden
                 del output
             else:
                 previous_hidden = hidden_states
@@ -322,9 +326,7 @@ def _forward_without_retained_boundaries(
                     input_activation_bytes=input_activation_bytes,
                     output_activation_bytes=output_activation_bytes,
                     logical_workspace_bytes=workspace_bytes,
-                    output_checksum=tensor_checksum(output.detach().cpu())
-                    if spec.name != "final-head"
-                    else tensor_checksum(_final_output_placeholder(output_activation_bytes)),
+                    output_checksum=output_checksum,
                     retained_after_group=False,
                     process_rss_after_compute_bytes=process_rss,
                     accelerator_after_compute=memory,
@@ -333,21 +335,8 @@ def _forward_without_retained_boundaries(
 
     if bounded_loss is None:
         raise RuntimeError("activation-recompute forward did not produce a loss")
-    if hidden_states is not None:
-        del hidden_states
     _release_accelerator(device)
     return bounded_loss, tuple(metrics), maximum_workspace
-
-
-def _final_output_placeholder(byte_count: int) -> Tensor:
-    """Return a deterministic zero-byte-summary tensor for released final logits.
-
-    The forward metric needs a stable checksum, but retaining full logits solely
-    for telemetry would contradict the no-boundary-retention contract.  The
-    byte count remains recorded separately.
-    """
-
-    return torch.tensor([byte_count], dtype=torch.int64)
 
 
 def _recompute_group_input(
@@ -530,8 +519,6 @@ def run_activation_recompute_validation(
         )
     maximum_gradient_group_bytes = maximum_parameter_group_bytes
     if maximum_gradient_group_bytes > gradient_working_set_bytes:
-        from .bounded_backward import GradientWorkingSetExceededError
-
         raise GradientWorkingSetExceededError(
             "largest gradient group requires "
             f"{maximum_gradient_group_bytes} bytes but the gradient budget is "
@@ -593,6 +580,7 @@ def run_activation_recompute_validation(
     for reverse_ordinal, spec in enumerate(reversed(groups)):
         replay: PrefixReplayMetrics | None = None
         input_cpu: Tensor | None = None
+        incoming_gradient_bytes = 0 if upstream is None else _activation_bytes(upstream)
         if spec.name != "embedding":
             input_cpu, replay = _recompute_group_input(
                 config,
@@ -607,9 +595,15 @@ def run_activation_recompute_validation(
                 activation_working_set_bytes=activation_working_set_bytes,
                 workspace_working_set_bytes=workspace_working_set_bytes,
             )
+            simultaneous_cpu_bytes = replay.output_activation_bytes + incoming_gradient_bytes
+            _check_activation(
+                simultaneous_cpu_bytes,
+                activation_working_set_bytes,
+                f"recomputed input and incoming gradient for {spec.name}",
+            )
             maximum_retained_activation = max(
                 maximum_retained_activation,
-                replay.output_activation_bytes,
+                simultaneous_cpu_bytes,
             )
             maximum_workspace = max(maximum_workspace, replay.maximum_workspace_bytes)
 
@@ -623,8 +617,8 @@ def run_activation_recompute_validation(
             )
         )
         _enable_parameter_gradients(tensors)
-        incoming_gradient_bytes = 0 if upstream is None else _activation_bytes(upstream)
         input_activation_bytes = 0
+        local_input: Tensor | None = None
         local_forward_started = time.perf_counter()
 
         if spec.name == "final-head":
@@ -669,7 +663,7 @@ def run_activation_recompute_validation(
             output.backward(upstream_device)
             synchronize_accelerator(device)
             backward_seconds = time.perf_counter() - backward_started
-            del upstream_device, upstream
+            del upstream_device
             upstream = None
         else:
             if upstream is None:
@@ -682,32 +676,27 @@ def run_activation_recompute_validation(
             output.backward(upstream_device)
             synchronize_accelerator(device)
             backward_seconds = time.perf_counter() - backward_started
-            del upstream_device, upstream
+            del upstream_device
             upstream = None
 
         output_activation_bytes = _activation_bytes(output)
-        if spec.name != "embedding":
+        if local_input is not None:
             if local_input.grad is None:
                 raise RuntimeError(f"missing upstream gradient after {spec.name}")
-            next_upstream = local_input.grad.detach().cpu().contiguous()
+            next_upstream: Tensor | None = local_input.grad.detach().cpu().contiguous()
             outgoing_gradient_bytes = _activation_bytes(next_upstream)
         else:
             next_upstream = None
             outgoing_gradient_bytes = 0
 
-        retained_activation_bytes = max(
-            incoming_gradient_bytes,
-            outgoing_gradient_bytes,
-            0 if replay is None else replay.output_activation_bytes,
-        )
         _check_activation(
-            retained_activation_bytes,
+            outgoing_gradient_bytes,
             activation_working_set_bytes,
-            f"backward group {spec.name}",
+            f"outgoing activation gradient for {spec.name}",
         )
         maximum_retained_activation = max(
             maximum_retained_activation,
-            retained_activation_bytes,
+            outgoing_gradient_bytes,
         )
         local_workspace = (
             input_activation_bytes
@@ -744,7 +733,7 @@ def run_activation_recompute_validation(
 
         release_started = time.perf_counter()
         del tensors, gradients, gradient_payloads, output
-        if spec.name != "embedding":
+        if local_input is not None:
             del local_input
         gc.collect()
         synchronize_accelerator(device)
@@ -802,7 +791,9 @@ def run_activation_recompute_validation(
         1.0 if max_norm is None else min(1.0, max_norm / (recomputed_norm + 1e-6))
     )
     prefix_metrics = tuple(
-        item.prefix_replay for item in backward_metrics if item.prefix_replay is not None
+        replay
+        for replay in (item.prefix_replay for item in backward_metrics)
+        if replay is not None
     )
 
     result = ActivationRecomputeResult(
