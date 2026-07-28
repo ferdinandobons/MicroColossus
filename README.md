@@ -10,9 +10,9 @@ The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 - **PyTorch MPS** is the numerical oracle and the reference for validation, debugging, state comparison, and recovery semantics.
 - Tensor storage, transactions, root checkpoints, data provenance, retention, and activation policies remain backend-neutral where practical.
 
-MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed global clipping, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, and safe checkpoint pruning on the target M2.
+MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed global clipping, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, safe checkpoint pruning, and persistent activation recomputation on the target M2.
 
-Version **0.12.0** adds persistent multi-step activation recomputation. The CPU implementation and regression gate have passed. Native Apple M2 validation is the next required gate.
+Version **0.12.0** adds persistent multi-step activation recomputation. Native Apple M2 validation passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`.
 
 ## Why Apple Silicon changes the design
 
@@ -108,6 +108,17 @@ Separate logical budgets cover:
 
 The activation policy is part of checkpoint identity. A root cannot silently change policy at resume.
 
+The accepted M2 gate demonstrated numerically stable `retain_all` and `recompute` trajectories on micro, tiny, and the 1.85M-parameter small workload. `recompute` retained zero forward-boundary bytes and reduced the small logical boundary footprint from `491,520` bytes to `0`.
+
+The same small gate measured a higher sampled peak RSS under full-prefix recomputation:
+
+```text
+retain_all: 444,071,936 bytes
+recompute:  533,528,576 bytes
+```
+
+This is a deliberate result, not a hidden failure. The logical zero-boundary contract passed, while the current synchronous schedule did not reduce measured physical RSS for that workload. The next milestone therefore uses a measured hybrid anchor planner rather than assuming that maximal recomputation is optimal.
+
 ### Deterministic real-text frontend
 
 The current frontend provides:
@@ -165,7 +176,7 @@ The corrected Apple M2/APFS validation demonstrated:
 | Persistent multi-step and process resume | PASS |
 | Deterministic real-text micro and 1.85M training | PASS |
 | Safe pruning and post-pruning resume | PASS |
-| Persistent activation recomputation | CPU gate PASS. M2 gate pending |
+| Persistent activation recomputation | PASS |
 
 The controlled resident 23,213,056-parameter benchmark produced:
 
@@ -269,7 +280,6 @@ microcolossus-prune apply \
 
 Not yet established:
 
-- Apple M2 validation of persistent activation recomputation;
 - hybrid activation anchors;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
