@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .bounded_optimizer import OptimizerGroupMetrics
@@ -14,6 +16,20 @@ from .step_bundle import (
 )
 from .storage_training import StateComparison
 from .training_checkpoint import BundleLineageEntry, TrainingMetadata
+
+
+def _prefix_replay_traffic(
+    result_path: str,
+    activation_policy: str,
+) -> tuple[int, int, int]:
+    if activation_policy != "recompute":
+        return 0, 0, 0
+    value = json.loads(Path(result_path).read_text(encoding="utf-8"))
+    return (
+        int(value["total_prefix_parameter_tensor_reads"]),
+        int(value["total_prefix_parameter_chunk_reads"]),
+        int(value["total_prefix_parameter_logical_bytes_read"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -75,8 +91,20 @@ class PersistentStepResult:
     total_parameter_physical_bytes_written: int
     total_optimizer_logical_bytes_written: int
     total_optimizer_physical_bytes_written: int
+    total_prefix_parameter_tensor_reads: int = field(init=False)
+    total_prefix_parameter_chunk_reads: int = field(init=False)
+    total_prefix_parameter_logical_bytes_read: int = field(init=False)
     full_candidate_state_materialized_for_validation: bool = True
     resident_oracle_materialized_for_validation: bool = True
+
+    def __post_init__(self) -> None:
+        tensor_reads, chunk_reads, logical_bytes = _prefix_replay_traffic(
+            self.bounded_backward_result_path,
+            self.activation_policy,
+        )
+        object.__setattr__(self, "total_prefix_parameter_tensor_reads", tensor_reads)
+        object.__setattr__(self, "total_prefix_parameter_chunk_reads", chunk_reads)
+        object.__setattr__(self, "total_prefix_parameter_logical_bytes_read", logical_bytes)
 
 
 @dataclass(frozen=True)
@@ -117,10 +145,30 @@ class BoundedTrainingResult:
     total_parameter_physical_bytes_written: int
     total_optimizer_logical_bytes_written: int
     total_optimizer_physical_bytes_written: int
+    total_prefix_parameter_tensor_reads: int = field(init=False)
+    total_prefix_parameter_chunk_reads: int = field(init=False)
+    total_prefix_parameter_logical_bytes_read: int = field(init=False)
     batch_cursor_derived_from_committed_step: bool = True
     full_final_state_materialized_for_validation: bool = True
     resident_reference_replayed_from_step_zero: bool = True
     historical_bundles_retained: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "total_prefix_parameter_tensor_reads",
+            sum(item.total_prefix_parameter_tensor_reads for item in self.steps),
+        )
+        object.__setattr__(
+            self,
+            "total_prefix_parameter_chunk_reads",
+            sum(item.total_prefix_parameter_chunk_reads for item in self.steps),
+        )
+        object.__setattr__(
+            self,
+            "total_prefix_parameter_logical_bytes_read",
+            sum(item.total_prefix_parameter_logical_bytes_read for item in self.steps),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
