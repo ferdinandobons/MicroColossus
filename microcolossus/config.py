@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -66,6 +67,93 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class ActivationAnchorPolicyConfig:
+    """Deterministic hybrid-anchor planning configuration."""
+
+    kind: str = "logical_budget_v1"
+    plan_path: str | None = None
+    plan_checksum: str | None = None
+    fixed_interval: int = 2
+    activation_working_set_mib: float = 1.0
+    workspace_working_set_mib: float = 4.0
+    max_replay_groups: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {
+            "logical_budget_v1",
+            "fixed_interval_v1",
+            "measured_budget_v1",
+        }:
+            raise ValueError(
+                "activation_anchor_policy.kind must be one of: "
+                "logical_budget_v1, fixed_interval_v1, measured_budget_v1"
+            )
+        _positive(self.fixed_interval, "activation_anchor_policy.fixed_interval")
+        _positive(
+            self.activation_working_set_mib,
+            "activation_anchor_policy.activation_working_set_mib",
+        )
+        _positive(
+            self.workspace_working_set_mib,
+            "activation_anchor_policy.workspace_working_set_mib",
+        )
+        if self.max_replay_groups is not None and self.max_replay_groups < 0:
+            raise ValueError(
+                "activation_anchor_policy.max_replay_groups cannot be negative"
+            )
+        if self.kind == "measured_budget_v1":
+            if self.plan_path is None or self.plan_checksum is None:
+                raise ValueError(
+                    "measured_budget_v1 requires a checksummed activation plan_path"
+                )
+        elif self.plan_path is not None or self.plan_checksum is not None:
+            raise ValueError(
+                "only measured_budget_v1 can reference an external activation plan"
+            )
+
+    @property
+    def activation_working_set_bytes(self) -> int:
+        return int(self.activation_working_set_mib * 1024**2)
+
+    @property
+    def workspace_working_set_bytes(self) -> int:
+        return int(self.workspace_working_set_mib * 1024**2)
+
+    def semantic_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "plan_checksum": self.plan_checksum,
+            "fixed_interval": self.fixed_interval,
+            "activation_working_set_mib": self.activation_working_set_mib,
+            "workspace_working_set_mib": self.workspace_working_set_mib,
+            "max_replay_groups": self.max_replay_groups,
+        }
+
+    @classmethod
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any],
+        *,
+        base_dir: Path | None = None,
+    ) -> ActivationAnchorPolicyConfig:
+        normalized = dict(values)
+        plan_path = _resolve_optional_path(normalized.get("plan_path"), base_dir)
+        plan_checksum: str | None = None
+        if plan_path is not None:
+            path = Path(plan_path)
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(value, dict):
+                    raise TypeError("activation plan must be a JSON object")
+                plan_checksum = str(value["plan_checksum"])
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"cannot read valid activation plan from {path}") from exc
+        normalized["plan_path"] = plan_path
+        normalized["plan_checksum"] = plan_checksum
+        return cls(**normalized)
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     """Configuration for resident and bounded full-parameter training."""
 
@@ -79,6 +167,7 @@ class TrainingConfig:
     device: str = "auto"
     mode: str = "reference"
     activation_policy: str = "retain_all"
+    activation_anchor_policy: ActivationAnchorPolicyConfig | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -96,14 +185,35 @@ class TrainingConfig:
             raise ValueError("device must be one of: auto, cpu, cuda, mps")
         if self.mode != "reference":
             raise ValueError("only reference mode is implemented")
-        if self.activation_policy not in {"retain_all", "recompute"}:
+        if self.activation_policy not in {"retain_all", "recompute", "hybrid"}:
             raise ValueError(
-                "training.activation_policy must be one of: retain_all, recompute"
+                "training.activation_policy must be one of: retain_all, recompute, hybrid"
+            )
+        if self.activation_policy == "hybrid" and self.activation_anchor_policy is None:
+            raise ValueError("hybrid activation policy requires activation_anchor_policy")
+        if self.activation_policy != "hybrid" and self.activation_anchor_policy is not None:
+            raise ValueError(
+                "activation_anchor_policy is valid only when activation_policy is hybrid"
             )
 
     @classmethod
-    def from_mapping(cls, values: Mapping[str, Any]) -> TrainingConfig:
-        return cls(**dict(values))
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any],
+        *,
+        base_dir: Path | None = None,
+    ) -> TrainingConfig:
+        normalized = dict(values)
+        raw_anchor_policy = normalized.pop("activation_anchor_policy", None)
+        anchor_policy = (
+            None
+            if raw_anchor_policy is None
+            else ActivationAnchorPolicyConfig.from_mapping(
+                _mapping(raw_anchor_policy, "training.activation_anchor_policy"),
+                base_dir=base_dir,
+            )
+        )
+        return cls(**normalized, activation_anchor_policy=anchor_policy)
 
 
 @dataclass(frozen=True)
@@ -268,7 +378,8 @@ class ExperimentConfig:
         output_dir = str(values.get("output_dir", "runs/experiment"))
         model = ModelConfig.from_mapping(_mapping(values.get("model", {}), "model"))
         training = TrainingConfig.from_mapping(
-            _mapping(values.get("training", {}), "training")
+            _mapping(values.get("training", {}), "training"),
+            base_dir=base_dir,
         )
         hardware = HardwareBudget.from_mapping(
             _mapping(values.get("hardware", {}), "hardware")
