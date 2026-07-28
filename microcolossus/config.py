@@ -169,6 +169,24 @@ class EvaluationConfig:
 
 
 @dataclass(frozen=True)
+class RetentionConfig:
+    """Explicit checkpoint-retention policy used by pruning commands."""
+
+    keep_previous: int = 2
+    milestone_interval: int = 0
+
+    def __post_init__(self) -> None:
+        if self.keep_previous < 0:
+            raise ValueError("retention.keep_previous cannot be negative")
+        if self.milestone_interval < 0:
+            raise ValueError("retention.milestone_interval cannot be negative")
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> RetentionConfig:
+        return cls(**dict(values))
+
+
+@dataclass(frozen=True)
 class HardwareBudget:
     """Logical memory and storage budgets consumed by the static planner.
 
@@ -220,6 +238,7 @@ class ExperimentConfig:
     hardware: HardwareBudget
     data: DataConfig = field(default_factory=DataConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    retention: RetentionConfig = field(default_factory=RetentionConfig)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -256,6 +275,9 @@ class ExperimentConfig:
         evaluation = EvaluationConfig.from_mapping(
             _mapping(values.get("evaluation", {}), "evaluation")
         )
+        retention = RetentionConfig.from_mapping(
+            _mapping(values.get("retention", {}), "retention")
+        )
         return cls(
             name=name,
             output_dir=output_dir,
@@ -264,6 +286,7 @@ class ExperimentConfig:
             hardware=hardware,
             data=data,
             evaluation=evaluation,
+            retention=retention,
         )
 
     def to_dict(self) -> dict[str, Any]:
