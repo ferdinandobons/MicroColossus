@@ -138,11 +138,14 @@ This decision came from resident measurements. Storage-backed paths must be benc
 
 | Workload | Parameters | Purpose |
 |---|---:|---|
-| Micro synthetic or text model | 11,456 | Fast end-to-end storage, recovery, resume, and failure tests |
+| Synthetic micro model | 11,456 | Fast storage, recovery, numerical, and failure tests |
+| Real-text micro model | 18,624 | Byte tokenizer, data identity, validation, samples, and resume |
 | Tiny model | 443,648 | Target-hardware numerical and telemetry gate |
-| Real-text small model | about 1.85M | First meaningful learning-trajectory experiment |
+| Real-text small model | 1,846,656 | First meaningful learning-trajectory experiment |
 | Competitive resident model | 23,213,056 | PyTorch MPS, checkpointed PyTorch, and MLX comparison |
 | Future capacity models | 124M, 350M, and later | Demonstrate state larger than safe resident memory |
+
+The two micro counts are intentionally different. The real-text model needs vocabulary size 256 and a 64-position embedding table. The older 11,456 count belongs to the synthetic model with vocabulary size 64 and a shorter positional table.
 
 Synthetic batches isolate runtime correctness. The byte-text frontend adds a real training trajectory without external tokenizer dependencies.
 
@@ -158,12 +161,13 @@ Synthetic batches isolate runtime correctness. The byte-text frontend adds a rea
 | 0.7.0 | Reverse group-bounded backward and gradient store | Validated on an 8 GB M2 |
 | 0.8.0 | Group-bounded AdamW and atomic root publication | Validated on an 8 GB M2 |
 | 0.9.0 | Consecutive bounded steps, lineage, checkpoint, and process resume | Validated on an 8 GB M2 |
-| 0.10.0 | Local real-text data identity, deterministic windows, validation, samples, and resume | CPU CI passed. Target MPS validation pending |
+| 0.10.0 | Local real-text identity, deterministic windows, validation, samples, and resume | Validated on an 8 GB M2 with a documented protocol correction |
 
-Accepted 0.9 runtime commit:
+Accepted runtime commits:
 
 ```text
-4b1ffb20857dd948d7737484e62b007f24bf69b9
+0.9.0:  4b1ffb20857dd948d7737484e62b007f24bf69b9
+0.10.0: 8bc277123267c3d3f15bf60cd640819fa823d2e3
 ```
 
 ## 11. Versioned state
@@ -195,6 +199,8 @@ prepared -> writing -> validated -> committed
 
 The previous `CURRENT` remains authoritative until all candidate data verifies and the new pointer is atomically published.
 
+Committed or aborted transactions release references to staged payloads. A live transaction object therefore cannot silently retain a full canonical copy after completion.
+
 ## 12. Root step bundles
 
 A root bundle references:
@@ -208,6 +214,22 @@ A root bundle references:
 - root checksum.
 
 Candidate child stores are not authoritative training state until the root bundle is published.
+
+The publication sequence is:
+
+```text
+build candidate child stores
+        ↓
+verify child stores
+        ↓
+write and fsync root manifest
+        ↓
+write and fsync candidate CURRENT
+        ↓
+atomic CURRENT rename
+```
+
+Failure before the final pointer replacement leaves the prior root authoritative.
 
 ## 13. Bounded execution
 
@@ -229,6 +251,8 @@ One parameter group is read, materialized, executed, and released at a time. The
 
 Boundary activations are currently retained on CPU. Groups execute in reverse order, locally recompute forward, propagate one incoming activation gradient, and publish final parameter gradients.
 
+The tied token embedding receives two gradient contributions. The output-head contribution is written first, then the embedding contribution is accumulated into a newer gradient version.
+
 ### 13.3 Global clipping
 
 Final gradients are streamed one tensor at a time. The clipping coefficient is:
@@ -237,9 +261,13 @@ Final gradients are streamed one tensor at a time. The clipping coefficient is:
 min(1, max_norm / (global_norm + 1e-6))
 ```
 
+The bounded path and resident oracle use the same coefficient.
+
 ### 13.4 AdamW
 
-For one unique group at a time, the runtime reads parameters, gradients, first moments, second moments, and step tensors. The shared embedding is updated exactly once.
+For one unique group at a time, the runtime reads parameters, gradients, first moments, second moments, and step tensors. The shared embedding is updated exactly once with its final accumulated gradient.
+
+New parameter and optimizer versions are written to candidate stores, restored, compared with the oracle, and then referenced by a new root bundle.
 
 ## 14. Persistent training and resume
 
@@ -251,6 +279,8 @@ step N -> step N+1
 
 The new root points to the prior root as parent. A later process can reopen `CURRENT` and continue without recreating parameters or Adam state.
 
+The root committed step is the authoritative next-batch cursor. A separate mutable cursor file is avoided because it could diverge from model and optimizer state after interruption.
+
 The accepted M2 gate demonstrated:
 
 - uninterrupted micro step 0 to 5;
@@ -258,7 +288,9 @@ The accepted M2 gate demonstrated:
 - bitwise-exact resumed versus uninterrupted final state;
 - tiny step 0 to 3;
 - correct optimizer step tensors and contiguous parent lineage;
-- preservation of step 2 after an interrupted attempt to publish step 3.
+- preservation of step 2 after an interrupted attempt to publish step 3;
+- rejection of incompatible configuration;
+- detection of a corrupted authoritative child store.
 
 ## 15. Real-text data contract
 
@@ -287,7 +319,7 @@ Persistent metadata includes:
 
 Changed corpus bytes or policies reject resume before another step is published.
 
-### 15.3 Cursor
+### 15.3 Cursor and windows
 
 For text training, committed cursor `N` deterministically selects byte windows using:
 
@@ -295,13 +327,15 @@ For text training, committed cursor `N` deterministically selects byte windows u
 seed = training seed + 1 + N
 ```
 
-The root committed step remains the authoritative next-batch cursor.
+Each microbatch row records its selected byte offset. The root committed step remains the authoritative next-batch cursor.
 
-### 15.4 Evaluation
+### 15.4 Evaluation and samples
 
 Validation loss and greedy samples are produced from the parameter store referenced by a committed bundle. Per-step progress files include bundle ID, offsets, seed, batch checksum, training loss, gradient norm, clipping coefficient, validation evidence, and sample tokens.
 
 Evaluation materializes a resident model and is excluded from bounded execution claims.
+
+Progress records are atomically written derived evidence. The root bundle remains authoritative. A missing progress record for an already committed current root can be reconstructed on resume.
 
 ## 16. Working-set budgets
 
@@ -328,46 +362,108 @@ Bitwise equality and numerical distance are reported separately. A checksum diff
 
 Complete oracle or candidate states, resident replay, validation, and generation may materialize full state only for declared verification or evaluation. They are excluded from bounded claims.
 
-## 18. Accepted evidence through 0.9
+## 18. Telemetry
 
-Key accepted M2 results include:
+The runtime and target harnesses report:
 
-- MLX at `1.592x` PyTorch MPS in the tested resident competitive workload;
+- per-group parameter, gradient, moment, and step bytes;
+- tensor and chunk reads;
+- logical and physical application writes;
+- chunk creation and reuse;
+- read, materialization, compute, export, commit, release, checksum, `fsync`, and publication times;
+- process RSS;
+- accelerator and driver allocation;
+- system memory pressure and swap;
+- manifest IDs, tensor versions, lineage, cursor, offsets, seeds, and checksums;
+- validation loss and sample provenance;
+- recovery actions and unpublished state;
+- cumulative storage growth.
+
+Application byte counters are not presented as NAND-level SSD writes.
+
+## 19. Accepted evidence through 0.10
+
+### 19.1 Resident and competitive foundation
+
+- fixed-batch MPS loss decreased from `5.566842079162598` to `0.4145740866661072`;
+- MLX reached `1.592x` PyTorch MPS throughput in the tested resident competitive workload;
+- the dual-backend decision was retained.
+
+### 19.2 Storage and bounded execution
+
 - exact storage lifecycle and failure recovery;
 - zero tested bounded-forward boundary, logits, and loss differences;
 - exact tested bounded-backward gradients;
+- streamed global gradient norm;
 - complete bounded AdamW and atomic publication;
-- multi-step resume matching uninterrupted execution bitwise;
-- maximum 0.9 bounded-versus-resident absolute state difference `7.450580596923828e-09`;
-- zero swap growth in the accepted 0.9 scenarios;
-- no detected hidden CPU fallback.
+- parameter, gradient, and optimizer budget rejection;
+- exact candidate restore.
 
-## 19. Version 0.10 CPU evidence
+### 19.3 Persistent multi-step 0.9
 
-The initial real-text implementation passed Python 3.11 and 3.13 CI with:
+- uninterrupted step 0 to 5 and resumed step 2 to 5 were bitwise exact;
+- maximum bounded-versus-resident absolute state difference was `7.450580596923828e-09`;
+- later-step atomicity, configuration rejection, and corruption detection passed;
+- swap growth was zero in the accepted scenarios.
 
-- Ruff;
-- mypy;
-- 88 tests and one skip;
-- compileall;
-- synthetic CPU smoke;
-- resident real-text smoke;
-- bounded real-text initialization and process resume;
-- deterministic tokenizer, split, windows, offsets, and checksums;
-- corpus mutation rejection;
-- exact uninterrupted-versus-resumed CPU state;
-- validation and sample progress records.
+### 19.4 Real-text 0.10
 
-Target MPS validation remains required before 0.10 is accepted as Apple Silicon evidence.
+The target report was formally labeled `FAIL` only because the external prompt expected the obsolete synthetic count of 11,456 parameters for `real-text-micro.yaml`. The checked configuration correctly plans 18,624 parameters. That protocol mismatch did not indicate a runtime failure.
 
-## 20. Current boundary
+Accepted target evidence after correcting the expectation:
+
+- native MPS execution on an 8 GB M2 with fallback disabled;
+- 88 tests passed with one skip, and Ruff, mypy, compileall, and doctor passed;
+- independent-process data identity matched;
+- byte-tokenizer round trip passed;
+- micro training step 0 to 20 was GREEN;
+- micro validation loss decreased from `5.548418998718262` to `3.302267074584961`;
+- process restart from step 5 to step 20 was GREEN;
+- uninterrupted versus resumed state was numerically stable with maximum absolute difference `1.1920928955078125e-07` and mean absolute difference `8.844825718731097e-10`;
+- data provenance and generated sample tokens matched;
+- corpus mutation was rejected before another step became authoritative;
+- the 1,846,656-parameter small run reached step 10 and was GREEN;
+- small validation loss decreased from `5.687370777130127` to `4.083975553512573`;
+- candidate restore was exact;
+- root and child stores verified and recovered;
+- no runtime fallback, unsupported operation, non-finite value, or unexpected command failure remained after audit;
+- final source state was clean.
+
+## 20. Important design decisions
+
+### 20.1 Correct synchronous path before overlap
+
+The project implements synchronous read, compute, write, verify, and publish before prefetch or asynchronous writeback.
+
+### 20.2 One source of complexity per milestone
+
+Forward, backward, gradient storage, clipping, optimizer execution, atomic publication, multi-step resume, and real-data provenance were isolated so failures remain localizable.
+
+### 20.3 Explicit shared-weight semantics
+
+Shared parameters have explicit forward reads, gradient accumulation, and unique optimizer update rules.
+
+### 20.4 Small models for fast iteration
+
+Synthetic micro, real-text micro, tiny, and small models are routine gates. Larger workloads are reserved for performance and capacity milestones.
+
+### 20.5 Checkpoint and data authority are unified
+
+Model state, optimizer state, parent lineage, consumed batch checksum, and next data cursor advance through one authoritative root checkpoint.
+
+### 20.6 Derived evidence is not authority
+
+Metrics and samples may be recreated from a committed root. They do not replace the root bundle as training state.
+
+## 21. Current boundary
 
 MicroColossus does not yet establish:
 
-- accepted M2 validation of 0.10 real-text training;
-- representative tokenizer or corpus quality;
-- large sharded dataset state;
+- a representative tokenizer or production corpus;
+- production model quality;
+- large sharded dataset state, epochs, and shuffle semantics;
 - activation recomputation from storage or activation offload;
+- bounded activation and workspace residency;
 - strict total-memory-pressure enforcement;
 - asynchronous prefetch or writeback;
 - intra-layer tiling;
@@ -376,20 +472,24 @@ MicroColossus does not yet establish:
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target machine.
 
-No full out-of-core, throughput-at-scale, model-quality, or model-capacity claim is made yet.
+No full out-of-core, throughput-at-scale, production model-quality, or model-capacity claim is made yet.
 
-## 21. Roadmap
+## 22. Roadmap
 
 | Milestone | Status |
 |---|---|
 | M0 through M4C. Resident, storage, bounded step, and persistent resume | Completed and validated on M2 |
-| M5. Deterministic small real-corpus frontend | Implemented. CPU CI passed. M2 gate pending |
-| M6. Activation recomputation, offload, and strict budgets | Planned |
+| M5. Deterministic small real-corpus frontend | Completed and validated on M2 |
+| M6A. Historical-state pruning and compaction | Next |
+| M6B. Activation recomputation, offload, and strict budgets | Planned |
 | M7. Asynchronous prefetch and writeback | Planned |
 | M8. Intra-layer tiling | Planned |
-| M9. 124M, 350M, and larger capacity demonstrations | Planned |
+| M9. Bounded MLX optimizer execution | Planned |
+| M10. 124M, 350M, and larger capacity demonstrations | Planned |
 
-## 22. Criteria for the first meaningful out-of-core result
+Pruning is promoted before longer real-data trajectories because the accepted 1.85M-parameter ten-step root occupied about 632 MB while retaining all historical candidates and work stores.
+
+## 23. Criteria for the first meaningful out-of-core result
 
 A meaningful demonstration requires:
 
@@ -404,11 +504,11 @@ A meaningful demonstration requires:
 9. explicit throughput and endurance costs;
 10. a useful training trajectory on real data.
 
-## 23. Documentation map
+## 24. Documentation map
 
 - [`project.md`](project.md): purpose, architecture, decisions, and roadmap.
 - [`storage.md`](storage.md): tensor store, transaction, bundle, and bounded execution design.
 - [`multistep.md`](multistep.md): persistent checkpoint, lineage, cursor, and resume design.
-- [`real-text.md`](real-text.md): corpus identity, tokenizer, validation, samples, and real-text gate.
+- [`real-text.md`](real-text.md): corpus identity, tokenizer, validation, samples, and accepted real-text gate.
 - [`validation.md`](validation.md): accepted evidence and exact validation boundaries.
 - [`competitive.md`](competitive.md): backend and optimization decisions supported by measurements.
