@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .bounded_optimizer import OptimizerGroupMetrics
+from .data import DataIdentity
+from .evaluation import TrainingProgressRecord
 from .step_bundle import (
     BundlePublicationTelemetry,
     BundleVerificationReport,
@@ -73,6 +75,7 @@ class BoundedTrainingResult:
     device: str
     bundle_store_path: str
     training_metadata: TrainingMetadata
+    data_identity: DataIdentity
     requested_target_step: int
     started_step: int
     final_step: int
@@ -81,6 +84,8 @@ class BoundedTrainingResult:
     initialization_publication: BundlePublicationTelemetry | None
     steps: tuple[PersistentStepResult, ...]
     lineage: tuple[BundleLineageEntry, ...]
+    progress_records: tuple[TrainingProgressRecord, ...]
+    metrics_directory: str
     final_bundle_verification: BundleVerificationReport
     final_bounded_vs_resident_state: StateComparison
     final_bundle_vs_restored_state: StateComparison

@@ -13,6 +13,7 @@ import torch
 from torch import Tensor, nn
 
 from .config import ExperimentConfig
+from .data import prepare_data_source
 from .model import DecoderOnlyTransformer
 from .planner import build_static_plan
 from .telemetry import (
@@ -179,7 +180,7 @@ def run_resident_experiment(
     steps_override: int | None = None,
     device_override: str | None = None,
 ) -> list[StepMetrics]:
-    """Run the current resident reference implementation and persist telemetry."""
+    """Run the resident reference implementation and persist telemetry."""
 
     training = config.training
     if steps_override is not None:
@@ -189,6 +190,7 @@ def run_resident_experiment(
     config = replace(config, training=training)
 
     seed_everything(training.seed)
+    data_source = prepare_data_source(config)
     device = resolve_device(training.device)
     model = DecoderOnlyTransformer(config.model).to(device)
     optimizer = torch.optim.AdamW(
@@ -196,7 +198,6 @@ def run_resident_experiment(
         lr=training.learning_rate,
         weight_decay=training.weight_decay,
     )
-    generator = torch.Generator(device="cpu").manual_seed(training.seed + 1)
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -204,22 +205,18 @@ def run_resident_experiment(
     steps_path.unlink(missing_ok=True)
     telemetry_writer = JsonlWriter(steps_path)
     write_json_atomic(output_dir / "resolved-config.json", config.to_dict())
+    write_json_atomic(output_dir / "data-identity.json", data_source.identity)
     plan = build_static_plan(model, config)
     write_json_atomic(output_dir / "memory-plan.json", plan.to_dict())
 
     metrics: list[StepMetrics] = []
     for step in range(training.steps):
-        input_ids, targets = make_synthetic_lm_batch(
-            batch_size=training.micro_batch_size,
-            sequence_length=training.sequence_length,
-            vocab_size=config.model.vocab_size,
-            generator=generator,
-        )
+        batch = data_source.training_batch(step)
         step_metrics = run_resident_step(
             model=model,
             optimizer=optimizer,
-            input_ids=input_ids,
-            targets=targets,
+            input_ids=batch.input_ids,
+            targets=batch.targets,
             device=device,
             step=step,
             gradient_clip_norm=training.gradient_clip_norm,
@@ -230,6 +227,8 @@ def run_resident_experiment(
     summary = {
         "experiment": config.name,
         "device": str(device),
+        "data_source_kind": data_source.identity.source_kind,
+        "data_identity_checksum": data_source.identity.identity_checksum,
         "steps": len(metrics),
         "final_loss": metrics[-1].loss if metrics else None,
         "parameter_count": model.parameter_count,

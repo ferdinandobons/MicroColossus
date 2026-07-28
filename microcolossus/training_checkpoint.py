@@ -1,4 +1,4 @@
-"""Persistent training metadata, batch cursor, and bundle initialization."""
+"""Persistent training metadata, data cursor, and bundle initialization."""
 
 from __future__ import annotations
 
@@ -7,14 +7,15 @@ import json
 import os
 import uuid
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import torch
 from torch import Tensor
 
 from .bounded_optimizer import _initialize_adamw_payloads, _store_limits
 from .config import ExperimentConfig
+from .data import DataIdentity, PreparedDataSource, prepare_data_source
 from .model import DecoderOnlyTransformer
 from .step_bundle import (
     BundlePublicationTelemetry,
@@ -24,12 +25,12 @@ from .step_bundle import (
 from .storage import IntegrityError, TensorPayload, VersionedTensorStore
 from .storage.adapters import export_pytorch_model
 from .storage.schema import StoreTelemetry, canonical_json_bytes, sha256_hex
-from .training import make_synthetic_lm_batch, seed_everything
+from .training import seed_everything
 
-BOUNDED_TRAINING_SCHEMA_VERSION = "microcolossus.bounded-training.v1"
-TRAINING_METADATA_SCHEMA_VERSION = "microcolossus.training-metadata.v1"
-MULTI_STEP_RUNTIME_VERSION = "0.9.0"
-BATCH_STREAM_VERSION = "synthetic-seed-per-cursor-v1"
+BOUNDED_TRAINING_SCHEMA_VERSION = "microcolossus.bounded-training.v2"
+TRAINING_METADATA_SCHEMA_VERSION = "microcolossus.training-metadata.v2"
+MULTI_STEP_RUNTIME_VERSION = "0.10.0"
+BATCH_STREAM_VERSION = "configured-data-source-v1"
 SCHEDULE_KIND = "constant"
 
 
@@ -45,6 +46,7 @@ class TrainingMetadata:
     seed: int
     batch_stream: str
     schedule_kind: str
+    data_identity: DataIdentity
     metadata_checksum: str = ""
 
     def payload_dict(self) -> dict[str, Any]:
@@ -55,6 +57,7 @@ class TrainingMetadata:
             "seed": self.seed,
             "batch_stream": self.batch_stream,
             "schedule_kind": self.schedule_kind,
+            "data_identity": self.data_identity.to_dict(),
         }
 
     def compute_checksum(self) -> str:
@@ -68,6 +71,7 @@ class TrainingMetadata:
             seed=self.seed,
             batch_stream=self.batch_stream,
             schedule_kind=self.schedule_kind,
+            data_identity=self.data_identity,
             metadata_checksum=self.compute_checksum(),
         )
 
@@ -76,6 +80,7 @@ class TrainingMetadata:
             raise IntegrityError(
                 f"unsupported training metadata schema: {self.schema_version}"
             )
+        self.data_identity.validate()
         if self.metadata_checksum != self.compute_checksum():
             raise IntegrityError("training metadata checksum mismatch")
 
@@ -93,6 +98,7 @@ class TrainingMetadata:
             seed=int(value["seed"]),
             batch_stream=str(value["batch_stream"]),
             schedule_kind=str(value["schedule_kind"]),
+            data_identity=DataIdentity.from_dict(dict(value["data_identity"])),
             metadata_checksum=str(value["metadata_checksum"]),
         )
         result.validate()
@@ -122,6 +128,14 @@ def _semantic_config(config: ExperimentConfig) -> dict[str, Any]:
             "seed": config.training.seed,
             "mode": config.training.mode,
         },
+        "data": {
+            "kind": config.data.kind,
+            "validation_fraction": config.data.validation_fraction,
+            "tokenizer": config.data.tokenizer,
+            "sampler": config.data.sampler,
+            "separate_validation_file": config.data.validation_path is not None,
+        },
+        "evaluation": asdict(config.evaluation),
         "batch_stream": BATCH_STREAM_VERSION,
         "schedule_kind": SCHEDULE_KIND,
     }
@@ -131,14 +145,18 @@ def config_digest(config: ExperimentConfig) -> str:
     return sha256_hex(canonical_json_bytes(_semantic_config(config)))
 
 
-def _metadata_for(config: ExperimentConfig) -> TrainingMetadata:
+def _metadata_for(
+    config: ExperimentConfig,
+    data_source: PreparedDataSource,
+) -> TrainingMetadata:
     return TrainingMetadata(
         schema_version=TRAINING_METADATA_SCHEMA_VERSION,
         config_digest=config_digest(config),
         runtime_version=MULTI_STEP_RUNTIME_VERSION,
         seed=config.training.seed,
-        batch_stream=BATCH_STREAM_VERSION,
+        batch_stream=data_source.identity.batch_stream_version,
         schedule_kind=SCHEDULE_KIND,
+        data_identity=data_source.identity,
     ).with_checksum()
 
 
@@ -166,15 +184,19 @@ def _load_training_metadata(root: Path) -> TrainingMetadata:
     path = root / "TRAINING.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        if not isinstance(value, dict):
+            raise TypeError("training metadata must be a JSON object")
+        return TrainingMetadata.from_dict(value)
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise IntegrityError(f"cannot read valid training metadata from {path}") from exc
-    if not isinstance(value, dict):
-        raise IntegrityError("training metadata must be a JSON object")
-    return TrainingMetadata.from_dict(value)
 
 
-def _validate_resume_metadata(config: ExperimentConfig, metadata: TrainingMetadata) -> None:
-    expected = _metadata_for(config)
+def _validate_resume_metadata(
+    config: ExperimentConfig,
+    metadata: TrainingMetadata,
+    data_source: PreparedDataSource,
+) -> None:
+    expected = _metadata_for(config, data_source)
     mismatches: list[str] = []
     for name in (
         "config_digest",
@@ -185,6 +207,8 @@ def _validate_resume_metadata(config: ExperimentConfig, metadata: TrainingMetada
     ):
         if getattr(metadata, name) != getattr(expected, name):
             mismatches.append(name)
+    if metadata.data_identity.to_dict() != expected.data_identity.to_dict():
+        mismatches.append("data_identity")
     if mismatches:
         raise ResumeConfigurationError(
             "training metadata does not match the requested configuration: "
@@ -192,18 +216,23 @@ def _validate_resume_metadata(config: ExperimentConfig, metadata: TrainingMetada
         )
 
 
+@lru_cache(maxsize=8)
+def _cached_data_source(config: ExperimentConfig) -> PreparedDataSource:
+    return prepare_data_source(config)
+
+
+def _prepare_data_source_for_run(config: ExperimentConfig) -> PreparedDataSource:
+    """Start one invocation with a fresh immutable view of configured data."""
+
+    _cached_data_source.cache_clear()
+    return _cached_data_source(config)
+
+
 def _batch_for_cursor(config: ExperimentConfig, cursor: int) -> tuple[Tensor, Tensor, int]:
-    if cursor < 0:
-        raise ValueError("batch cursor cannot be negative")
-    batch_seed = config.training.seed + 1 + cursor
-    generator = torch.Generator(device="cpu").manual_seed(batch_seed)
-    input_ids, targets = make_synthetic_lm_batch(
-        batch_size=config.training.micro_batch_size,
-        sequence_length=config.training.sequence_length,
-        vocab_size=config.model.vocab_size,
-        generator=generator,
-    )
-    return input_ids, targets, batch_seed
+    """Compatibility wrapper for callers that need one configured training batch."""
+
+    batch = _cached_data_source(config).training_batch(cursor)
+    return batch.input_ids, batch.targets, batch.seed
 
 
 def _open_referenced_store(
@@ -277,10 +306,11 @@ def _commit_initial_payloads(
 def _initialize_training_root(
     config: ExperimentConfig,
     destination: Path,
+    data_source: PreparedDataSource,
 ) -> tuple[StepBundleStore, StepBundleManifest, BundlePublicationTelemetry, TrainingMetadata]:
     seed_everything(config.training.seed)
     bundle_store = StepBundleStore.create(destination)
-    metadata = _metadata_for(config)
+    metadata = _metadata_for(config, data_source)
     _write_training_metadata(destination, metadata)
 
     parameter_store_path = destination / "candidates" / "step-0-parameters"
