@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,15 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
 def _positive(value: int | float, name: str) -> None:
     if value <= 0:
         raise ValueError(f"{name} must be greater than zero")
+
+
+def _resolve_optional_path(value: Any, base_dir: Path | None) -> str | None:
+    if value is None:
+        return None
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute() and base_dir is not None:
+        path = base_dir / path
+    return str(path.resolve())
 
 
 @dataclass(frozen=True)
@@ -58,7 +67,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Configuration for the resident reference training loop."""
+    """Configuration for resident and bounded full-parameter training."""
 
     steps: int = 2
     micro_batch_size: int = 2
@@ -89,6 +98,73 @@ class TrainingConfig:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> TrainingConfig:
+        return cls(**dict(values))
+
+
+@dataclass(frozen=True)
+class DataConfig:
+    """Deterministic training-data frontend configuration."""
+
+    kind: str = "synthetic"
+    train_path: str | None = None
+    validation_path: str | None = None
+    validation_fraction: float = 0.1
+    tokenizer: str = "utf8-bytes-v1"
+    sampler: str = "random-window-v1"
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"synthetic", "utf8_text"}:
+            raise ValueError("data.kind must be one of: synthetic, utf8_text")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("data.validation_fraction must be in (0, 1)")
+        if self.tokenizer != "utf8-bytes-v1":
+            raise ValueError("only utf8-bytes-v1 tokenizer is implemented")
+        if self.sampler != "random-window-v1":
+            raise ValueError("only random-window-v1 sampler is implemented")
+        if self.kind == "synthetic":
+            if self.train_path is not None or self.validation_path is not None:
+                raise ValueError("synthetic data cannot define corpus paths")
+        elif self.train_path is None:
+            raise ValueError("utf8_text data requires train_path")
+
+    @classmethod
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any],
+        *,
+        base_dir: Path | None = None,
+    ) -> DataConfig:
+        normalized = dict(values)
+        normalized["train_path"] = _resolve_optional_path(
+            normalized.get("train_path"), base_dir
+        )
+        normalized["validation_path"] = _resolve_optional_path(
+            normalized.get("validation_path"), base_dir
+        )
+        return cls(**normalized)
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    """Validation-loss and deterministic sample-generation configuration."""
+
+    enabled: bool = False
+    interval_steps: int = 1
+    validation_batches: int = 2
+    sample_tokens: int = 0
+    sample_prompt: str = ""
+    generation: str = "greedy-v1"
+
+    def __post_init__(self) -> None:
+        _positive(self.interval_steps, "evaluation.interval_steps")
+        _positive(self.validation_batches, "evaluation.validation_batches")
+        if self.sample_tokens < 0:
+            raise ValueError("evaluation.sample_tokens cannot be negative")
+        if self.generation != "greedy-v1":
+            raise ValueError("only greedy-v1 generation is implemented")
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> EvaluationConfig:
         return cls(**dict(values))
 
 
@@ -142,6 +218,8 @@ class ExperimentConfig:
     model: ModelConfig
     training: TrainingConfig
     hardware: HardwareBudget
+    data: DataConfig = field(default_factory=DataConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -150,9 +228,18 @@ class ExperimentConfig:
             raise ValueError("output_dir cannot be empty")
         if self.training.sequence_length > self.model.max_sequence_length:
             raise ValueError("training.sequence_length exceeds model.max_sequence_length")
+        if self.data.kind == "utf8_text" and self.model.vocab_size != 256:
+            raise ValueError("utf8_text requires model.vocab_size == 256")
+        if self.evaluation.enabled and self.data.kind != "utf8_text":
+            raise ValueError("evaluation is currently implemented only for utf8_text data")
 
     @classmethod
-    def from_mapping(cls, values: Mapping[str, Any]) -> ExperimentConfig:
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any],
+        *,
+        base_dir: Path | None = None,
+    ) -> ExperimentConfig:
         name = str(values.get("name", "experiment"))
         output_dir = str(values.get("output_dir", "runs/experiment"))
         model = ModelConfig.from_mapping(_mapping(values.get("model", {}), "model"))
@@ -162,12 +249,21 @@ class ExperimentConfig:
         hardware = HardwareBudget.from_mapping(
             _mapping(values.get("hardware", {}), "hardware")
         )
+        data = DataConfig.from_mapping(
+            _mapping(values.get("data", {}), "data"),
+            base_dir=base_dir,
+        )
+        evaluation = EvaluationConfig.from_mapping(
+            _mapping(values.get("evaluation", {}), "evaluation")
+        )
         return cls(
             name=name,
             output_dir=output_dir,
             model=model,
             training=training,
             hardware=hardware,
+            data=data,
+            evaluation=evaluation,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,7 +273,10 @@ class ExperimentConfig:
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
     """Load and validate an experiment YAML file."""
 
-    config_path = Path(path)
+    config_path = Path(path).expanduser().resolve()
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
-    return ExperimentConfig.from_mapping(_mapping(raw, "configuration"))
+    return ExperimentConfig.from_mapping(
+        _mapping(raw, "configuration"),
+        base_dir=config_path.parent,
+    )
