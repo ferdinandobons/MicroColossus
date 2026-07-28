@@ -151,9 +151,91 @@ Every persistent step records:
 
 The detailed recomputation JSON also records replayed group names, prefix parameter tensor and chunk reads, prefix logical bytes, local forward and backward time, and gradient-store traffic.
 
-## 9. Current claim boundary
+## 9. Accepted Apple M2 evidence
 
-MicroColossus 0.12 establishes persistent multi-step training with either full boundary retention or synchronous zero-boundary prefix recomputation, including process resume and pruning compatibility.
+The native Apple M2 validation tested commit:
+
+```text
+4742f8a7f57a46edb075159275fb66c83c78ced7
+```
+
+Package version: `0.12.0`.
+
+Overall result: **PASS**.
+
+The quality gate passed Ruff, mypy, pytest, compileall, doctor, help, and static plan commands. All runtime scenarios passed with MPS built and available and `PYTORCH_ENABLE_MPS_FALLBACK` unset.
+
+### 9.1 Numerical comparisons
+
+All principal policy comparisons were classified `NUMERICALLY_STABLE`:
+
+| Comparison | Maximum absolute state difference | Mean absolute state difference | Maximum loss difference | Maximum gradient-norm difference |
+|---|---:|---:|---:|---:|
+| Micro round 1, retain versus recompute | `1.862645149230957e-08` | `2.6070487856787704e-10` | `0.0` | `5.061370145220678e-08` |
+| Micro round 2, retain versus recompute | `2.2351741790771484e-08` | `2.6154205006840354e-10` | `0.0` | `5.061370145220678e-08` |
+| Resume recompute versus uninterrupted | `1.6763806343078613e-08` | `1.9436587520528433e-10` | `0.0` | `5.74115421869692e-09` |
+| Tiny retain versus recompute | `2.3283064365386963e-10` | `8.079835528479944e-16` | `0.0` | `0.0` |
+| Small retain versus recompute | `4.656612873077393e-10` | `4.673514187992496e-15` | `0.0` | `9.893160068941143e-08` |
+| Pruned resume versus unpruned | `2.2351741790771484e-08` | `2.1037602991500962e-10` | `0.0` | `6.147735875927651e-08` |
+
+Both injected publication-failure retry paths remained numerically stable. Their maximum state difference was `5.960464477539063e-08`, and the maximum observed loss difference was `4.76837158203125e-07`.
+
+Batch provenance, cursor sequence, checksums, and generated sample sequences matched in the compared trajectories. Candidate restore remained exact.
+
+### 9.2 Replay and logical activation memory
+
+Expected replay totals were observed:
+
+```text
+real-text micro: 15 groups over five optimizer steps
+tiny:            18 groups over three optimizer steps
+real-text small: 15 groups over one optimizer step
+```
+
+For the 1,846,656-parameter small workload:
+
+```text
+retain_all forward-boundary bytes: 491,520
+recompute forward-boundary bytes:        0
+
+retain_all maximum retained activation bytes: 491,520
+recompute maximum retained activation bytes:  196,608
+maximum local workspace for both policies:    393,216
+```
+
+The small recompute path read `19,200,000` logical parameter bytes during prefix replay and recorded approximately `0.102379` seconds of prefix recomputation.
+
+This is accepted evidence for a material logical activation reduction and a zero-forward-boundary contract.
+
+### 9.3 Physical-memory observation
+
+The small physical-memory classification was `HIGHER`:
+
+```text
+retain_all sampled peak RSS: 444,071,936 bytes
+recompute sampled peak RSS:  533,528,576 bytes
+ratio:                        1.2014462809917354x
+```
+
+This does not invalidate the logical activation contract. It demonstrates that the synchronous full-prefix policy is not yet a physical-memory optimization for the measured small workload. RSS, MPS allocator counters, Metal-driver allocation, filesystem cache, compressed memory, and swap overlap or describe different scopes and must not be added as independent memory pools.
+
+### 9.4 Durability and safety
+
+The target gate also passed:
+
+- process restart and recompute resume;
+- activation-policy mismatch rejection;
+- activation and workspace budget rejection;
+- pruning followed by recompute resume;
+- preservation of the previous root at both publication failure points;
+- tied-gradient accumulation count `2`;
+- unique tied-parameter AdamW update count `1`;
+- fallback, unsupported-operator, and non-finite scans;
+- clean final Git state.
+
+## 10. Current claim boundary
+
+MicroColossus 0.12 establishes persistent multi-step training with either full boundary retention or synchronous zero-boundary prefix recomputation on Apple M2, including process resume, pruning compatibility, budget rejection, and atomic failure recovery.
 
 It does not yet establish:
 
@@ -161,10 +243,11 @@ It does not yet establish:
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - optimal replay scheduling;
-- reduced physical RSS on every workload;
+- lower physical RSS for every workload;
+- strict total physical-memory-pressure enforcement;
 - direct-I/O or NVMe-specific behavior;
 - bounded MLX backward or optimizer execution;
 - intra-layer activation tiling;
 - training state larger than unified memory.
 
-The next optimization should compare `retain_all` and `recompute` on Apple M2, then use the measured replay and memory curves to choose hybrid anchor intervals rather than guessing them.
+The next milestone is a measured hybrid anchor planner. It must use the accepted replay, logical-memory, and physical-memory observations to search for a Pareto improvement instead of choosing an arbitrary fixed checkpoint interval.

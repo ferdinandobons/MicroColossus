@@ -12,7 +12,7 @@ Every accepted target run must identify:
 - framework and dependency versions;
 - commands, exit codes, stdout, stderr, and elapsed time;
 - numerical results and raw tolerances;
-- memory, swap, storage, and publication telemetry;
+- memory, swap, storage, replay, and publication telemetry;
 - generated artifacts;
 - source-tree state before and after execution;
 - capabilities that were not exercised.
@@ -25,6 +25,7 @@ Mandatory distinctions:
 - one bounded step is not a multi-step training run;
 - a multi-step synthetic run is not real-corpus training;
 - a CPU result is not evidence for MPS or MLX;
+- a logical working-set reduction is not automatically a physical RSS reduction;
 - a functional pass with tracked local changes is not a clean protocol pass;
 - a protocol expectation can be wrong even when the checked runtime is correct;
 - checksum equality is stronger than numerical agreement;
@@ -47,7 +48,7 @@ Mandatory distinctions:
 | Persistent multi-step and resume | `4b1ffb20857dd948d7737484e62b007f24bf69b9`, 0.9.0 | PASS on 8 GB M2 | Consecutive bounded steps, process restart, exact resume, lineage, and later-step atomicity work on MPS |
 | Deterministic real-text training | `8bc277123267c3d3f15bf60cd640819fa823d2e3`, 0.10.0 | PASS on 8 GB M2 after protocol correction | Real-text micro and 1.85M trajectories, validation, samples, provenance, mutation rejection, and resume work on MPS |
 | Safe pruning and reclamation | `1fedf611e7a090dad218be64811e0a4e007fbd77`, 0.11.0 | PASS on 8 GB M2 and APFS | Deterministic pruning, interruption recovery, material reclamation, idempotence, and post-pruning resume work |
-| Persistent activation recomputation | PR head `7d9a1293148bf8af86d01f8b00d26c5ece9975c1`, merged as `9617be6678d39be44dc1826bce218b82dce2c161`, 0.12.0 | PASS in CPU CI. M2 gate pending | Multi-step zero-boundary recomputation, budgets, resume, pruning compatibility, and exact controlled CPU state are implemented |
+| Persistent activation recomputation | `4742f8a7f57a46edb075159275fb66c83c78ced7`, 0.12.0 | PASS on 8 GB M2 | Zero-forward-boundary recomputation, budgets, resume, pruning compatibility, and failure recovery work. Full-prefix recomputation increased sampled RSS in the small gate |
 
 ## 3. Resident Apple M2 foundation
 
@@ -59,16 +60,7 @@ a56fc514f2f8e705654034f3c2f02e3a441c61f3
 
 Result: **PASS**.
 
-Validated:
-
-- MacBook Air M2 with 8 GB unified memory;
-- native arm64 execution without Rosetta;
-- PyTorch MPS built and available;
-- explicit and automatic MPS selection;
-- CPU-versus-MPS numerical comparison;
-- fixed-batch learning;
-- synchronized memory and timing telemetry;
-- clean source tree.
+Validated native arm64 MPS execution, explicit and automatic MPS selection, CPU-versus-MPS numerical comparison, synchronized telemetry, and clean source state.
 
 Fixed-batch loss:
 
@@ -85,8 +77,6 @@ Accepted commit:
 ```text
 785183a1ff87df0c22df9619d1ab7bf53968bc79
 ```
-
-Environment included PyTorch 2.13.0 with MPS, MLX 0.32.0, NumPy 2.4.6, native arm64, and MPS-to-CPU fallback disabled.
 
 A controlled 23,213,056-parameter workload produced:
 
@@ -123,22 +113,22 @@ Key evidence:
 - two GREEN micro runs;
 - bitwise-exact micro repeatability;
 - one GREEN 443,648-parameter tiny run;
-- zero resident-versus-storage loss difference;
-- zero gradient-norm difference;
-- zero final-state absolute difference;
+- zero resident-versus-storage loss, gradient-norm, and final-state differences;
 - exact storage-versus-restored state;
 - all five tensor-store failure points preserved the prior manifest;
-- MLX micro and tiny model or optimizer round trips passed;
+- MLX micro and tiny round trips passed;
 - cross-backend canonical model state was GREEN.
 
-Observed application traffic:
+Application traffic:
 
-- bytes read: `7,468,738`;
-- referenced chunk reads: `226`;
-- bytes written: `7,641,680`;
-- chunk writes: `166`;
-- reused chunks: `60`;
-- reuse ratio: `26.55%`.
+```text
+bytes read:       7,468,738
+chunk reads:      226
+bytes written:    7,641,680
+chunk writes:     166
+reused chunks:    60
+reuse ratio:      26.55%
+```
 
 This result validated storage lifecycle and recovery. It did not validate bounded compute.
 
@@ -152,11 +142,9 @@ Accepted commit:
 
 Result: **PASS**.
 
-Key evidence:
-
 - micro repeatability was BITWISE_EXACT;
 - tiny was GREEN;
-- intentional parameter-budget rejection passed;
+- parameter-budget rejection passed;
 - largest micro group: `33,280` bytes;
 - largest tiny group: `788,480` bytes;
 - configured budget: `1,048,576` bytes;
@@ -176,8 +164,6 @@ c72dcc2f8d8a7bd783ae263cf14476d0681b664b
 
 Result: **PASS**.
 
-Key evidence:
-
 - two micro runs were GREEN and BITWISE_EXACT;
 - tiny was GREEN;
 - reverse group order was correct;
@@ -189,8 +175,6 @@ Key evidence:
 - parameter and gradient budget rejection passed;
 - parameter and gradient stores verified and recovered.
 
-This phase intentionally did not update parameters or AdamW state.
-
 ## 8. Bounded AdamW and atomic root publication
 
 Accepted commit:
@@ -200,8 +184,6 @@ ef88198d66f1d1795ffa14dcb6db388ae1715e85
 ```
 
 Result: **PASS**.
-
-Working sets:
 
 | Configuration | Maximum parameter group | Maximum gradient group | Maximum optimizer group |
 |---|---:|---:|---:|
@@ -229,8 +211,6 @@ Accepted commit:
 
 Result: **PASS**.
 
-Key evidence:
-
 - micro uninterrupted step 0 to 5: GREEN;
 - process exit at step 2 and resume to step 5: GREEN;
 - uninterrupted versus resumed final state: BITWISE_EXACT;
@@ -253,13 +233,11 @@ Accepted commit:
 8bc277123267c3d3f15bf60cd640819fa823d2e3
 ```
 
-The external report initially labeled the release `FAIL` because the validation prompt expected 11,456 parameters for `real-text-micro.yaml`. The checked configuration correctly contains 18,624 parameters because the byte tokenizer requires a 256-token embedding and a 64-position table. The stale value belonged to the synthetic micro configuration.
+The external report initially labeled the release `FAIL` because the validation prompt expected 11,456 parameters for `real-text-micro.yaml`. The checked configuration correctly contains 18,624 parameters. The stale value belonged to the synthetic micro configuration.
 
 Accepted result after correcting the protocol expectation: **PASS**.
 
 ### 10.1 Micro trajectory
-
-Configuration:
 
 ```text
 parameters:          18,624
@@ -288,8 +266,6 @@ A separate process resumed from step 5 to step 20. Uninterrupted and resumed sta
 Changing copied corpus bytes after step 2 produced `ResumeConfigurationError` for `data_identity`. Step 3 was not published.
 
 ### 10.3 Small trajectory
-
-Configuration:
 
 ```text
 parameters:          1,846,656
@@ -321,18 +297,9 @@ Accepted corrected commit:
 
 Package version: `0.11.0`.
 
-Environment:
-
-- MacBook Air `Mac14,2` with Apple M2;
-- 8 GB unified memory;
-- APFS filesystem;
-- native arm64 without Rosetta;
-- PyTorch MPS built and available;
-- MPS fallback unset.
-
 Overall result: **PASS**.
 
-### 11.1 Quality gate
+Quality gate:
 
 - Ruff: PASS;
 - mypy: PASS;
@@ -340,25 +307,19 @@ Overall result: **PASS**.
 - compileall: PASS;
 - doctor, help, and static plan commands: PASS.
 
-### 11.2 Micro pruning
-
-Deterministic plan:
+### 11.1 Micro pruning
 
 ```text
 retained steps: [0, 5, 9, 10]
 pruned steps:   [1, 2, 3, 4, 6, 7, 8]
 selected bytes: 10,739,392
-```
 
-Apply evidence:
-
-```text
 managed bytes: 13,037,759 -> 2,330,216
 APFS du:       16,830,464 -> 3,235,840
 reclaimed:     10,739,392 bytes
 ```
 
-`CURRENT` remained byte-identical and state-identical. Retained checkpoints verified. Reapplying the same completed plan reclaimed zero new bytes and reported idempotence. Training resumed to step 12.
+`CURRENT` remained byte-identical and state-identical. Retained checkpoints verified. Reapply was idempotent. Training resumed to step 12.
 
 Pruned versus unpruned training was numerically stable:
 
@@ -367,7 +328,7 @@ Pruned versus unpruned training was numerically stable:
 - validation-loss difference: `2.384185791015625e-07`;
 - batch provenance and sample sequences matched.
 
-### 11.3 Failure and drift scenarios
+### 11.2 Failure and drift scenarios
 
 Passed:
 
@@ -377,9 +338,9 @@ Passed:
 - resume after interruption;
 - rejection of a deletion target changed after planning.
 
-### 11.4 Small-model reclamation
+### 11.3 Small-model reclamation
 
-The 1,846,656-parameter real-text small run used corrected budgets of 2 MiB for parameters, 2 MiB for gradients, and 32 MiB for optimizer state.
+The 1,846,656-parameter real-text small run used budgets of 2 MiB for parameters, 2 MiB for gradients, and 32 MiB for optimizer state.
 
 Result: `PASS_SMALL_MATERIAL_RECLAMATION`.
 
@@ -393,78 +354,124 @@ APFS du reduction:      292,491,264 bytes
 
 Reapply was idempotent and training resumed to step 6.
 
-No hidden CPU fallback, unsupported MPS operator, unexpected non-finite value, or unexpected command failure remained after audit. Final Git status and diff were clean.
-
-Scope boundary: the run validated synchronous ordinary-filesystem pruning on APFS. It did not validate direct NVMe I/O, activation offload, or larger-than-memory training.
+Scope boundary: synchronous ordinary-filesystem pruning on APFS. Direct NVMe I/O, activation offload, and larger-than-memory training were not validated.
 
 ## 12. Persistent activation recomputation
 
-PR head:
+Accepted target commit:
 
 ```text
-7d9a1293148bf8af86d01f8b00d26c5ece9975c1
-```
-
-Merged to `main` as:
-
-```text
-9617be6678d39be44dc1826bce218b82dce2c161
+4742f8a7f57a46edb075159275fb66c83c78ced7
 ```
 
 Package version: `0.12.0`.
 
-CPU CI result: **PASS** on Python 3.11 and 3.13.
+Environment:
 
-### 12.1 Implemented policies
+- MacBook Air with Apple M2 and 8 GB unified memory;
+- native arm64;
+- MPS built and available;
+- MPS fallback unset;
+- clean fresh clone and clean final source state.
+
+Overall result: **PASS**.
+
+### 12.1 Quality and runtime gates
+
+Passed:
+
+- Ruff;
+- mypy;
+- pytest;
+- compileall;
+- doctor, help, and static plan commands;
+- micro retain-versus-recompute rounds;
+- recompute process restart and resume;
+- activation-policy mismatch rejection;
+- activation and workspace budget rejection;
+- tiny retain-versus-recompute;
+- small activation-memory comparison;
+- pruning followed by recompute resume;
+- both root-publication failure-preservation scenarios;
+- fallback, unsupported-operator, and non-finite scans.
+
+The harness validated `1,645` JSON files and found no `.state.npz` dependency.
+
+### 12.2 Numerical comparisons
+
+All principal comparisons were `NUMERICALLY_STABLE`:
+
+| Comparison | Maximum absolute state difference | Mean absolute state difference | Maximum loss difference | Maximum gradient-norm difference |
+|---|---:|---:|---:|---:|
+| Micro round 1, retain versus recompute | `1.862645149230957e-08` | `2.6070487856787704e-10` | `0.0` | `5.061370145220678e-08` |
+| Micro round 2, retain versus recompute | `2.2351741790771484e-08` | `2.6154205006840354e-10` | `0.0` | `5.061370145220678e-08` |
+| Resume recompute versus uninterrupted | `1.6763806343078613e-08` | `1.9436587520528433e-10` | `0.0` | `5.74115421869692e-09` |
+| Tiny retain versus recompute | `2.3283064365386963e-10` | `8.079835528479944e-16` | `0.0` | `0.0` |
+| Small retain versus recompute | `4.656612873077393e-10` | `4.673514187992496e-15` | `0.0` | `9.893160068941143e-08` |
+| Pruned resume versus unpruned | `2.2351741790771484e-08` | `2.1037602991500962e-10` | `0.0` | `6.147735875927651e-08` |
+
+Both injected publication-failure retry paths were numerically stable with maximum absolute state difference `5.960464477539063e-08`. The maximum observed loss difference in those paths was `4.76837158203125e-07`.
+
+Batch provenance and sample sequences matched. Candidate restore remained exact.
+
+### 12.3 Replay and activation working sets
+
+Expected replay totals were observed:
 
 ```text
-retain_all
-recompute
+real-text micro: 15 groups over five steps
+tiny:            18 groups over three steps
+real-text small: 15 groups over one step
 ```
 
-`retain_all` preserves non-final forward boundaries on CPU.
+Small logical activation evidence:
 
-`recompute` preserves zero forward boundaries for later backward. Each reverse group reconstructs its input by replaying the deterministic prefix from token IDs and the authoritative parameter store.
+```text
+retain_all forward-boundary bytes: 491,520
+recompute forward-boundary bytes:        0
 
-### 12.2 CPU correctness gate
+retain_all maximum retained activation bytes: 491,520
+recompute maximum retained activation bytes:  196,608
+maximum local workspace for both policies:    393,216
+```
 
-Accepted coverage includes:
+The small recompute path read `19,200,000` logical parameter bytes during prefix replay and recorded approximately `0.102379` seconds of prefix recomputation.
 
-- exact controlled multi-step `retain_all` versus `recompute` canonical parameter and Adam state;
-- zero retained forward-boundary count and bytes under `recompute`;
-- deterministic replay count and telemetry;
-- process exit and resume under `recompute`;
-- rejection of activation-policy changes at resume;
-- activation-budget rejection without publishing another root;
-- workspace-budget rejection without publishing another root;
-- tied-token-embedding gradient accumulation and unique AdamW update;
-- exact candidate restore;
-- preservation of the previous root after injected publication failure;
+This is accepted evidence for a material logical activation reduction and the zero-forward-boundary contract.
+
+### 12.4 Physical-memory observation
+
+The small physical-memory classification was `HIGHER`:
+
+```text
+retain_all sampled peak RSS: 444,071,936 bytes
+recompute sampled peak RSS:  533,528,576 bytes
+ratio:                        1.2014462809917354x
+```
+
+This does not invalidate M6B. It establishes that the synchronous full-prefix schedule is not a physical-memory optimization for the measured small workload. RSS, MPS allocation, Metal-driver allocation, filesystem cache, compressed memory, and swap remain non-additive and must be interpreted separately.
+
+### 12.5 Safety and durability
+
+Passed:
+
+- activation-policy mismatch rejection;
+- activation-budget and workspace-budget rejection without root publication;
+- tied-gradient accumulation count `2`;
+- tied-parameter AdamW update count `1`;
 - pruning followed by recompute resume;
-- real-text micro controlled comparison;
-- installed CLI smoke;
-- Ruff, mypy, pytest, compileall, and release-contract checks.
+- previous-root preservation at both root-publication failure points;
+- retry after the injected failures;
+- hidden fallback, unsupported operator, and non-finite scans;
+- clean final Git state.
 
-### 12.3 Current M6B boundary
+### 12.6 Accepted conclusion
 
-This CPU evidence does not establish Apple M2 behavior, physical RSS reduction, Metal allocator behavior, or target throughput.
+M6B is complete for the tested PyTorch MPS path.
 
-The next accepted target gate must compare `retain_all` and `recompute` on native MPS and record:
+The accepted result establishes persistent multi-step activation recomputation with zero forward-boundary retention, strict logical activation and workspace budgets, process resume, pruning compatibility, and atomic failure recovery.
 
-- numerical trajectory and final-state distance;
-- zero retained forward-boundary bytes for `recompute`;
-- maximum retained activation bytes;
-- maximum workspace bytes;
-- total prefix groups replayed;
-- recomputation time;
-- process RSS;
-- MPS allocation;
-- Metal-driver allocation;
-- swap and memory pressure;
-- process restart and resume;
-- pruning followed by resume;
-- hidden fallback and unsupported-operator scan;
-- final source integrity.
+It does not establish activation storage or offload, asynchronous overlap, direct NVMe behavior, bounded MLX optimization, intra-layer tiling, lower physical RSS on every workload, or larger-than-memory training.
 
 ## 13. Milestone status
 
@@ -481,8 +488,8 @@ The next accepted target gate must compare `retain_all` and `recompute` on nativ
 | M4C. Consecutive bounded steps, checkpoint, and resume | Completed and validated on M2 |
 | M5. Deterministic small real-corpus frontend | Completed and validated on M2 |
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
-| M6B. Persistent activation recomputation and strict budgets | Implemented and CPU-validated. M2 gate pending |
-| M6C. Hybrid activation-anchor policy | Not started |
+| M6B. Persistent activation recomputation and strict budgets | Completed and validated on M2 |
+| M6C. Measured hybrid activation-anchor planner | Open in issue #27 |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
 | Bounded MLX backward and optimizer execution | Not started |
@@ -492,7 +499,6 @@ The next accepted target gate must compare `retain_all` and `recompute` on nativ
 
 The accepted evidence does not establish:
 
-- Apple M2 validation of persistent activation recomputation;
 - hybrid activation anchors;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
@@ -512,6 +518,19 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 
 ## 15. Next engineering gate
 
-The immediate next gate is native Apple M2 validation of MicroColossus 0.12.0.
+The next implementation gate is M6C, a measured hybrid activation-anchor planner.
 
-After accepted target evidence, the next implementation should use measured replay and memory curves to select hybrid activation anchors. The project should not guess anchor intervals before the synchronous zero-boundary reference is measured on the target machine.
+The planner must use the accepted M2 observations rather than an arbitrary checkpoint interval. It should search for a Pareto improvement across:
+
+- retained anchor bytes;
+- local workspace;
+- replayed group count;
+- logical parameter rereads;
+- recomputation time;
+- end-to-end step time;
+- RSS;
+- MPS allocation;
+- Metal-driver allocation;
+- swap and memory pressure.
+
+Correctness, resume, pruning, tied-weight semantics, and atomic publication must remain unchanged.
