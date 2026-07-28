@@ -11,6 +11,8 @@ import torch
 from .bounded_optimizer import _optimizer_records, _store_payloads
 from .bounded_training_types import BoundedTrainingResult, PersistentStepResult
 from .config import ExperimentConfig
+from .data import PreparedDataSource
+from .evaluation import ensure_progress_record, load_progress_records
 from .model import DecoderOnlyTransformer
 from .persistent_step import advance_one_step
 from .step_bundle import BundleFailureInjector, BundlePublicationTelemetry, StepBundleStore
@@ -24,11 +26,11 @@ from .training_checkpoint import (
     BOUNDED_TRAINING_SCHEMA_VERSION,
     MULTI_STEP_RUNTIME_VERSION,
     ResumeConfigurationError,
-    _batch_for_cursor,
     _initialize_training_root,
     _lineage,
     _load_training_metadata,
     _open_referenced_store,
+    _prepare_data_source_for_run,
     _validate_resume_metadata,
 )
 
@@ -47,6 +49,7 @@ def _resident_reference_state(
     *,
     target_step: int,
     device: torch.device,
+    data_source: PreparedDataSource,
 ) -> tuple[TensorPayload, ...]:
     seed_everything(config.training.seed)
     model = DecoderOnlyTransformer(config.model).to(device)
@@ -63,9 +66,9 @@ def _resident_reference_state(
         state["exp_avg_sq"] = torch.zeros_like(parameter)
     model.train()
     for cursor in range(target_step):
-        input_ids, targets, _ = _batch_for_cursor(config, cursor)
+        batch = data_source.training_batch(cursor)
         optimizer.zero_grad(set_to_none=True)
-        output = model(input_ids.to(device), targets.to(device))
+        output = model(batch.input_ids.to(device), batch.targets.to(device))
         if output.loss is None:
             raise RuntimeError("resident reference did not return a loss")
         output.loss.backward()
@@ -130,6 +133,40 @@ def _current_bundle_state(
     return state, comparison, tuple(step_values)
 
 
+def _ensure_current_progress(
+    config: ExperimentConfig,
+    *,
+    bundle_store: StepBundleStore,
+    data_source: PreparedDataSource,
+    device: torch.device,
+) -> None:
+    current = bundle_store.current_manifest()
+    if current.committed_step == 0:
+        batch_cursor = None
+        batch_seed = None
+        batch_offsets: tuple[int, ...] = ()
+    else:
+        batch_cursor = current.committed_step - 1
+        batch = data_source.training_batch(batch_cursor)
+        batch_seed = batch.seed
+        batch_offsets = batch.offsets
+    ensure_progress_record(
+        config,
+        bundle_store=bundle_store,
+        manifest=current,
+        data_source=data_source,
+        device=device,
+        batch_cursor=batch_cursor,
+        batch_seed=batch_seed,
+        batch_source_kind=data_source.identity.source_kind,
+        batch_offsets=batch_offsets,
+        batch_checksum=current.batch_checksum,
+        training_loss=None,
+        gradient_norm=None,
+        clipping_coefficient=None,
+    )
+
+
 def run_bounded_training(
     config: ExperimentConfig,
     *,
@@ -146,18 +183,19 @@ def run_bounded_training(
 
     if target_step < 0:
         raise ValueError("target_step cannot be negative")
+    data_source = _prepare_data_source_for_run(config)
     destination = Path(bundle_store_path)
     initialization_publication: BundlePublicationTelemetry | None = None
     if destination.exists():
         bundle_store = StepBundleStore.open(destination)
         metadata = _load_training_metadata(destination)
-        _validate_resume_metadata(config, metadata)
+        _validate_resume_metadata(config, metadata, data_source)
         current = bundle_store.current_manifest()
         resumed = True
         initialized_bundle_id = _lineage(bundle_store)[0].bundle_id
     else:
         bundle_store, current, initialization_publication, metadata = (
-            _initialize_training_root(config, destination)
+            _initialize_training_root(config, destination, data_source)
         )
         resumed = False
         initialized_bundle_id = current.bundle_id
@@ -170,6 +208,12 @@ def run_bounded_training(
 
     device = resolve_device(device_override or config.training.device)
     seed_everything(config.training.seed)
+    _ensure_current_progress(
+        config,
+        bundle_store=bundle_store,
+        data_source=data_source,
+        device=device,
+    )
     step_results: list[PersistentStepResult] = []
     while current.committed_step < target_step:
         step = advance_one_step(
@@ -185,10 +229,35 @@ def run_bounded_training(
         )
         step_results.append(step)
         current = bundle_store.current_manifest()
+        batch = data_source.training_batch(step.batch_cursor)
+        ensure_progress_record(
+            config,
+            bundle_store=bundle_store,
+            manifest=current,
+            data_source=data_source,
+            device=device,
+            batch_cursor=step.batch_cursor,
+            batch_seed=step.batch_seed,
+            batch_source_kind=batch.source_kind,
+            batch_offsets=batch.offsets,
+            batch_checksum=step.batch_checksum,
+            training_loss=step.bounded_loss,
+            gradient_norm=step.bounded_gradient_norm,
+            clipping_coefficient=step.clipping_coefficient,
+        )
 
     lineage = _lineage(bundle_store)
     if lineage[-1].committed_step != target_step:
         raise IntegrityError("final lineage step does not match requested target")
+    progress = load_progress_records(destination)
+    if tuple(item.step for item in progress) != tuple(item.committed_step for item in lineage):
+        raise IntegrityError("progress steps do not match root bundle lineage")
+    bundle_ids_match = all(
+        record.bundle_id == item.bundle_id
+        for record, item in zip(progress, lineage, strict=True)
+    )
+    if not bundle_ids_match:
+        raise IntegrityError("progress bundle IDs do not match root bundle lineage")
     current_state, current_vs_restored, optimizer_steps = _current_bundle_state(
         config,
         bundle_store,
@@ -198,6 +267,7 @@ def run_bounded_training(
         config,
         target_step=target_step,
         device=device,
+        data_source=data_source,
     )
     bounded_vs_resident = compare_states(resident_state, current_state)
     verification = bundle_store.verify(current.bundle_id)
@@ -207,6 +277,7 @@ def run_bounded_training(
         device=str(device),
         bundle_store_path=str(destination),
         training_metadata=metadata,
+        data_identity=data_source.identity,
         requested_target_step=target_step,
         started_step=started_step,
         final_step=current.committed_step,
@@ -215,6 +286,8 @@ def run_bounded_training(
         initialization_publication=initialization_publication,
         steps=tuple(step_results),
         lineage=lineage,
+        progress_records=progress,
+        metrics_directory=str(destination / "metrics"),
         final_bundle_verification=verification,
         final_bounded_vs_resident_state=bounded_vs_resident,
         final_bundle_vs_restored_state=current_vs_restored,
