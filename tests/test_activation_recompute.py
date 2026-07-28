@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import microcolossus
 from microcolossus.activation_recompute import (
     ACTIVATION_RECOMPUTE_SCHEMA_VERSION,
     ActivationWorkingSetExceededError,
@@ -16,6 +17,16 @@ from microcolossus.config import load_experiment_config
 
 def _config():
     return load_experiment_config(Path("examples/micro-storage.yaml"))
+
+
+def test_activation_recompute_public_api() -> None:
+    assert microcolossus.ActivationRecomputeResult.__name__ == "ActivationRecomputeResult"
+    assert microcolossus.ActivationWorkingSetExceededError is ActivationWorkingSetExceededError
+    assert microcolossus.WorkspaceWorkingSetExceededError is WorkspaceWorkingSetExceededError
+    assert (
+        microcolossus.run_activation_recompute_validation
+        is run_activation_recompute_validation
+    )
 
 
 def test_activation_recompute_matches_resident_gradients(tmp_path: Path) -> None:
