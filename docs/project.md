@@ -55,6 +55,10 @@ versioned storage-backed tensor state
 
 The current implementation uses normal filesystem I/O. Direct I/O, device-specific NVMe behavior, and physical NAND-write guarantees are not claimed.
 
+### 3.4 Logical budgets are not physical-memory proof
+
+Parameter, gradient, optimizer, activation, and workspace budgets are logical guardrails. A policy can reduce logical retained tensors while still increasing sampled RSS because allocator behavior, replay workspaces, caches, compressed memory, and validation-only materialization affect the physical process footprint.
+
 ## 4. Goals
 
 MicroColossus aims to:
@@ -258,19 +262,17 @@ explicit apply
     -> preserve CURRENT byte-for-byte
 ```
 
-Retention can preserve:
-
-- `CURRENT`;
-- a declared number of previous checkpoints;
-- optional milestone checkpoints.
+Retention can preserve `CURRENT`, a declared number of previous checkpoints, and optional milestone checkpoints.
 
 Root manifests remain as lightweight lineage metadata. Only retained checkpoints keep restorable parameter, optimizer, and gradient child stores.
 
 Pruning is manual and conservative. It is not a background operation.
 
+The accepted M2/APFS gate reclaimed `10,739,392` bytes in the micro scenario and `289,540,389` selected bytes in the 1.85M-parameter small scenario while preserving `CURRENT`, retained state, recovery, and resume.
+
 ## 13. Activation policies
 
-Version 0.12 introduces:
+Version 0.12 supports:
 
 ```yaml
 training:
@@ -305,7 +307,7 @@ embedding backward
 
 The first schedule is synchronous and intentionally favors correctness and observability over throughput. Prefix replay can be quadratic in execution-group count.
 
-The recomputed gradient store then uses the same global clipping, group-bounded AdamW, candidate verification, atomic publication, progress, resume, and pruning contracts as `retain_all`.
+The recomputed gradient store uses the same clipping, group-bounded AdamW, candidate verification, atomic publication, progress, resume, and pruning contracts as `retain_all`.
 
 The activation policy is part of checkpoint identity. A root cannot silently change policy at resume.
 
@@ -322,28 +324,7 @@ The runtime enforces separate logical budgets for:
 
 These budgets are logical guardrails. They are not a direct measurement of total physical unified-memory use.
 
-## 15. Telemetry
-
-The runtime and validation harnesses report:
-
-- per-group parameter, gradient, moment, activation, and workspace bytes;
-- tensor and chunk reads;
-- logical and physical application writes;
-- chunk creation and reuse;
-- read, materialization, compute, replay, export, commit, release, checksum, `fsync`, and publication times;
-- retained forward-boundary count and bytes;
-- total prefix groups replayed and recomputation time;
-- process RSS;
-- MPS, Metal-driver, and MLX allocator counters;
-- system memory pressure and swap;
-- manifest IDs, tensor versions, lineage, cursor, offsets, seeds, and checksums;
-- validation loss and sample provenance;
-- recovery actions and unpublished state;
-- storage growth and reclaimed historical bytes.
-
-Application byte counters are not NAND-level SSD-write measurements.
-
-## 16. Development workloads
+## 15. Development workloads
 
 | Workload | Parameters | Purpose |
 |---|---:|---|
@@ -356,7 +337,7 @@ Application byte counters are not NAND-level SSD-write measurements.
 
 The two micro counts are intentionally different. The real-text model uses vocabulary size 256 and a larger positional table.
 
-## 17. Implemented releases
+## 16. Implemented releases
 
 | Release | Main capability | Accepted status |
 |---|---|---|
@@ -370,7 +351,7 @@ The two micro counts are intentionally different. The real-text model uses vocab
 | 0.9.0 | Consecutive bounded steps, lineage, checkpoint, and process resume | Validated on an 8 GB M2 |
 | 0.10.0 | Deterministic local real-text trajectory, validation, samples, and resume | Validated on an 8 GB M2 after a protocol correction |
 | 0.11.0 | Safe retention, pruning journal, reclamation, and resume after pruning | Validated on an 8 GB M2 and APFS |
-| 0.12.0 | Persistent activation policies, recomputation, activation and workspace budgets | CPU CI accepted. Apple M2 target gate pending |
+| 0.12.0 | Persistent activation policies, recomputation, activation and workspace budgets | Validated on an 8 GB M2 |
 
 Important accepted commits:
 
@@ -378,13 +359,12 @@ Important accepted commits:
 0.9.0 persistent resume: 4b1ffb20857dd948d7737484e62b007f24bf69b9
 0.10.0 real text:       8bc277123267c3d3f15bf60cd640819fa823d2e3
 0.11.0 pruning fix:     1fedf611e7a090dad218be64811e0a4e007fbd77
-0.12.0 M6B PR head:     7d9a1293148bf8af86d01f8b00d26c5ece9975c1
-0.12.0 merge commit:    9617be6678d39be44dc1826bce218b82dce2c161
+0.12.0 target gate:     4742f8a7f57a46edb075159275fb66c83c78ced7
 ```
 
-## 18. Accepted target evidence
+## 17. Accepted target evidence
 
-### 18.1 Competitive resident baseline
+### 17.1 Competitive resident baseline
 
 A controlled 23,213,056-parameter resident workload produced:
 
@@ -394,76 +374,98 @@ A controlled 23,213,056-parameter resident workload produced:
 | PyTorch MPS checkpointed | 1,337.37 | 0.970x |
 | MLX | 2,195.69 | 1.592x |
 
-### 18.2 Persistent and real-text training
+### 17.2 Persistent and real-text training
 
-Accepted target runs demonstrated:
+Accepted target runs demonstrated uninterrupted and resumed multi-step training, deterministic provenance, real-text learning signals, exact candidate restore, and corpus-mutation rejection.
 
-- uninterrupted and process-resumed multi-step training;
-- exact or numerically stable canonical final state, according to the tested path;
-- deterministic data provenance and checkpoint lineage;
-- real-text micro validation loss from `5.548418998718262` to `3.302267074584961` over 20 steps;
-- real-text small validation loss from `5.687370777130127` to `4.083975553512573` over 10 steps;
-- exact candidate restore;
-- rejection of corpus mutation before another step became authoritative.
+### 17.3 Pruning
 
-### 18.3 Pruning
+The corrected 0.11 M2/APFS run demonstrated deterministic planning, material reclamation, interruption continuation, idempotence, and process resume after pruning.
 
-The corrected 0.11 M2/APFS run demonstrated:
+### 17.4 Activation recomputation
 
-- deterministic, non-mutating plans;
-- micro retention steps `[0, 5, 9, 10]`;
-- micro reclamation of `10,739,392` bytes;
-- micro managed bytes from `13,037,759` to `2,330,216`;
-- APFS `du` from `16,830,464` to `3,235,840` bytes;
-- idempotent repeated apply;
-- process resume after pruning;
-- retry after pre-journal interruption;
-- continuation after one completed deletion;
-- rejection of a changed target;
-- small-model reclamation of `289,540,389` selected bytes;
-- clean source state and no detected hidden CPU fallback.
+The 0.12 M2 gate demonstrated:
 
-### 18.4 Activation recomputation CPU gate
-
-The 0.12 CI gate on Python 3.11 and 3.13 established:
-
-- persistent multi-step `retain_all` and `recompute` execution;
-- exact canonical CPU state between policies for controlled workloads;
+- numerically stable `retain_all` and `recompute` parameter plus optimizer state;
 - zero retained forward-boundary bytes under `recompute`;
-- deterministic prefix replay telemetry;
+- expected replay totals of `15` for micro, `18` for tiny, and `15` for small;
 - process restart and resume under `recompute`;
 - activation-policy mismatch rejection;
-- activation and workspace budget rejection without root publication;
-- tied-gradient accumulation and unique AdamW update semantics;
+- activation and workspace budget rejection;
 - pruning followed by recompute resume;
-- preservation of the previous root after injected publication failure;
-- installed CLI smoke and release contract `0.12.0`.
+- preservation of the previous root after injected publication failures;
+- tied-gradient accumulation and unique AdamW update semantics;
+- clean source state and no detected hidden fallback or non-finite value.
 
-This is not Apple M2 evidence. The target gate remains required.
+Small logical activation evidence:
 
-## 19. Correctness policy
+```text
+retain_all forward-boundary bytes: 491,520
+recompute forward-boundary bytes:        0
+retain_all maximum retained activation:  491,520
+recompute maximum retained activation:   196,608
+maximum local workspace:                 393,216
+```
 
-### CPU
+Small replay evidence:
 
-Exact canonical state is required when operation order and semantics are equivalent.
+```text
+logical parameter bytes reread: 19,200,000
+recorded prefix recomputation:  about 0.102379 seconds
+```
 
-### MPS and MLX
+Small physical-memory observation:
 
-Bitwise equality and numerical distance are reported separately. A checksum difference alone is not a numerical failure.
+```text
+retain_all sampled peak RSS: 444,071,936 bytes
+recompute sampled peak RSS:  533,528,576 bytes
+ratio:                        1.2014462809917354x
+```
 
-### Validation-only materialization
+The logical memory reduction is accepted. The physical result shows that full-prefix recomputation is not yet the optimal policy for the measured workload.
 
-Complete oracle states, resident replay, validation, and sample generation may materialize full state only for declared verification. They are excluded from bounded-capacity claims.
+## 18. Important design decisions
 
-### Pruning
+### 18.1 Correct synchronous path before overlap
 
-`CURRENT` must remain byte-identical. Every retained checkpoint must verify before and after apply. Resume after pruning must match an equivalent unpruned trajectory within the declared numerical band.
+The project implements synchronous read, compute, write, verify, publish, prune, and replay before prefetch or asynchronous writeback.
 
-## 20. Current claim boundary
+### 18.2 One source of complexity per milestone
+
+Forward, backward, gradient storage, clipping, optimizer execution, atomic publication, multi-step resume, real-data provenance, retention, and activation scheduling were isolated so failures remain localizable.
+
+### 18.3 Explicit shared-weight semantics
+
+Shared parameters have explicit forward reads, gradient accumulation, and unique optimizer update rules.
+
+### 18.4 Small models for fast iteration
+
+Synthetic micro, real-text micro, tiny, and small models are routine gates. Larger workloads are reserved for performance and capacity milestones.
+
+### 18.5 Checkpoint and data authority are unified
+
+Model state, optimizer state, parent lineage, consumed batch checksum, and next data cursor advance through one authoritative root checkpoint.
+
+### 18.6 Derived evidence is not authority
+
+Metrics and samples may be recreated from a committed root. They do not replace the root bundle as training state.
+
+### 18.7 Lineage metadata and restorable history are separate
+
+Root manifests preserve the committed trajectory. Retention policy decides which historical checkpoints still own restorable child state.
+
+### 18.8 Destructive maintenance is explicit
+
+Training never silently deletes history. Planning is dry-run. Apply requires a checksummed plan and a separate explicit command.
+
+### 18.9 Logical and physical activation optimization are separate
+
+Zero forward-boundary retention is a logical property. A useful policy must also be evaluated against physical RSS, allocator counters, replay cost, and memory pressure on the target machine.
+
+## 19. Current boundary
 
 MicroColossus does not yet establish:
 
-- Apple M2 validation of persistent activation recomputation;
 - hybrid activation anchors;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
@@ -482,20 +484,20 @@ MicroColossus does not yet establish:
 
 No complete out-of-core, production-quality, throughput-at-scale, or model-capacity claim is made yet.
 
-## 21. Roadmap
+## 20. Roadmap
 
 | Milestone | Status |
 |---|---|
 | M0 through M5. Resident, storage, bounded execution, resume, and real text | Completed and validated on M2 |
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
-| M6B. Persistent activation recomputation and strict activation/workspace budgets | Implemented and CPU-validated. M2 gate pending |
-| M6C. Hybrid anchor planner from measured replay and memory curves | Planned after M6B target evidence |
+| M6B. Persistent activation recomputation and strict activation/workspace budgets | Completed and validated on M2 |
+| M6C. Measured hybrid activation-anchor planner | Open in issue #27 |
 | M7. Asynchronous prefetch and writeback | Planned |
 | M8. Intra-layer tiling | Planned |
 | M9. Bounded MLX backward and optimizer execution | Planned |
 | M10. 124M, 350M, and larger capacity demonstrations | Planned |
 
-## 22. Criteria for a meaningful out-of-core result
+## 21. Criteria for a meaningful out-of-core result
 
 A meaningful capacity demonstration requires:
 
@@ -510,13 +512,13 @@ A meaningful capacity demonstration requires:
 9. explicit throughput, replay, and endurance costs;
 10. a useful training trajectory on real data.
 
-## 23. Documentation map
+## 22. Documentation map
 
 - [`project.md`](project.md). Purpose, architecture, decisions, releases, and roadmap.
 - [`storage.md`](storage.md). Tensor store, transactions, bundles, and bounded execution.
 - [`multistep.md`](multistep.md). Persistent checkpoints, lineage, cursor, and resume.
 - [`real-text.md`](real-text.md). Data identity, tokenizer, validation, samples, and real-text evidence.
 - [`pruning.md`](pruning.md). Retention, planning, apply, journal, recovery, and M2 pruning evidence.
-- [`activations.md`](activations.md). Activation policies, recomputation, budgets, telemetry, and limits.
+- [`activations.md`](activations.md). Activation policies, recomputation, budgets, telemetry, and accepted M2 evidence.
 - [`validation.md`](validation.md). Accepted executable evidence and exact claim boundaries.
 - [`competitive.md`](competitive.md). Backend and optimization decisions supported by measurements.
