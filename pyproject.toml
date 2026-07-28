@@ -34,6 +34,7 @@ benchmark = [
 
 [project.scripts]
 microcolossus = "microcolossus.cli:main"
+microcolossus-activation-recompute = "microcolossus.activation_recompute_cli:main"
 microcolossus-bounded-train = "microcolossus.bounded_training_cli:main"
 microcolossus-prune = "microcolossus.pruning_cli:main"
 
