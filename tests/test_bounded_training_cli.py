@@ -40,7 +40,7 @@ def test_bounded_training_cli_initializes_and_resumes(tmp_path: Path, capsys) ->
     second_output = json.loads(capsys.readouterr().out)
 
     assert first == 0
-    assert first_output["schema_version"] == "microcolossus.bounded-training.v1"
+    assert first_output["schema_version"] == "microcolossus.bounded-training.v2"
     assert first_output["final_step"] == 1
     assert second == 0
     assert second_output["resumed"]
