@@ -1,4 +1,4 @@
-"""Advance one persistent bounded training step from an authoritative bundle."""
+"""Advance one authoritative persistent training root by one bounded optimizer step."""
 
 from __future__ import annotations
 
@@ -8,13 +8,17 @@ import uuid
 from pathlib import Path
 
 import torch
-from torch import Tensor
 
+from .activation_planner import ActivationPlan
 from .activation_recompute import (
     ActivationWorkingSetExceededError,
     WorkspaceWorkingSetExceededError,
 )
-from .bounded_backward import _batch_checksum
+from .bounded_backward import (
+    _batch_checksum,
+    _read_all_gradients,
+    run_bounded_backward_from_store,
+)
 from .bounded_forward import build_execution_groups
 from .bounded_optimizer import (
     OptimizerGroupMetrics,
@@ -27,83 +31,45 @@ from .bounded_optimizer import (
     _parameter_records,
     _payload_digest,
     _read_payloads,
-    _store_limits,
+    _resident_oracle_from_current_state,
     _store_payloads,
 )
 from .bounded_training_types import PersistentStepResult
 from .config import ExperimentConfig
 from .model import DecoderOnlyTransformer
-from .persistent_backward import run_bounded_backward_from_store
+from .persistent_hybrid import run_hybrid_activation_from_store
 from .persistent_recompute import run_activation_recompute_from_store
-from .step_bundle import (
-    BundleFailureInjector,
-    StepBundleManifest,
-    StepBundleStore,
-)
+from .step_bundle import BundleFailureInjector, StepBundleManifest, StepBundleStore
 from .storage import IntegrityError, TensorPayload, VersionedTensorStore
 from .storage.adapters import export_pytorch_state, restore_pytorch_state
-from .storage.schema import StoreTelemetry
 from .storage_training import compare_states
-from .telemetry import (
-    accelerator_memory_metrics,
-    process_rss_bytes,
-    synchronize_accelerator,
-)
-from .training_checkpoint import _batch_for_cursor, _open_referenced_store
+from .telemetry import accelerator_memory_metrics, process_rss_bytes, synchronize_accelerator
+from .training_checkpoint import _open_referenced_store
 
 
-def _resident_oracle_from_current_state(
+def _batch_for_cursor(
     config: ExperimentConfig,
-    *,
-    parameter_store: VersionedTensorStore,
-    optimizer_store: VersionedTensorStore,
-    oracle_store_path: Path,
-    input_ids: Tensor,
-    targets: Tensor,
-    device: torch.device,
-    clipping_coefficient: float,
-    committed_step: int,
-) -> tuple[float, StoreTelemetry]:
-    model = DecoderOnlyTransformer(config.model).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
-        foreach=False,
+    batch_cursor: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    batch_seed = config.training.seed + 1 + batch_cursor
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(batch_seed)
+    shape = (config.training.micro_batch_size, config.training.sequence_length)
+    input_ids = torch.randint(
+        0,
+        config.model.vocab_size,
+        shape,
+        generator=generator,
+        dtype=torch.long,
     )
-    state_payloads = tuple(
-        sorted(
-            _store_payloads(parameter_store) + _store_payloads(optimizer_store),
-            key=lambda item: item.logical_name,
-        )
+    targets = torch.randint(
+        0,
+        config.model.vocab_size,
+        shape,
+        generator=generator,
+        dtype=torch.long,
     )
-    restore_pytorch_state(model, state_payloads, optimizer=optimizer)
-    del state_payloads
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
-    output = model(input_ids.to(device), targets.to(device))
-    if output.loss is None:
-        raise RuntimeError("resident multi-step oracle did not return a loss")
-    output.loss.backward()
-    for parameter in model.parameters():
-        if parameter.grad is not None:
-            parameter.grad.mul_(clipping_coefficient)
-    synchronize_accelerator(device)
-    optimizer.step()
-    synchronize_accelerator(device)
-    loss = float(output.loss.detach().cpu().item())
-    oracle_payloads = export_pytorch_state(model, optimizer)
-    oracle_store = VersionedTensorStore.create(
-        oracle_store_path,
-        limits=_store_limits(config),
-    )
-    transaction = oracle_store.begin_transaction(committed_step=committed_step)
-    transaction.put_many(oracle_payloads)
-    commit = transaction.commit()
-    del oracle_payloads, output, optimizer, model
-    gc.collect()
-    synchronize_accelerator(device)
-    return loss, commit.telemetry
+    return input_ids, targets, batch_seed
 
 
 def _commit_versioned_payloads(
@@ -112,7 +78,7 @@ def _commit_versioned_payloads(
     *,
     committed_step: int,
     version: int,
-) -> StoreTelemetry:
+):
     transaction = store.begin_transaction(committed_step=committed_step)
     for payload in payloads:
         transaction.put_tensor(payload, version=version)
@@ -144,6 +110,7 @@ def advance_one_step(
     optimizer_working_set_bytes: int,
     activation_working_set_bytes: int,
     workspace_working_set_bytes: int,
+    activation_plan: ActivationPlan | None,
     bundle_failure_injector: BundleFailureInjector | None,
 ) -> PersistentStepResult:
     next_step = current.committed_step + 1
@@ -163,8 +130,57 @@ def advance_one_step(
 
     parameter_store = _open_referenced_store(bundle_store, current, kind="parameter")
     optimizer_store = _open_referenced_store(bundle_store, current, kind="optimizer")
+    activation_plan_checksum: str | None = None
+    activation_profile_checksum: str | None = None
+    anchor_group_names: tuple[str, ...] = ()
+    maximum_replayed_groups = 0
+    replay_parameter_logical_bytes = 0
+    replay_parameter_chunk_reads = 0
 
-    if config.training.activation_policy == "recompute":
+    if config.training.activation_policy == "hybrid":
+        if activation_plan is None:
+            raise RuntimeError("hybrid activation policy requires a resolved plan")
+        hybrid = run_hybrid_activation_from_store(
+            config,
+            activation_plan=activation_plan,
+            parameter_store=parameter_store,
+            oracle_gradient_store_path=oracle_gradient_store_path,
+            gradient_store_path=gradient_store_path,
+            output_path=backward_result_path,
+            input_ids=input_ids,
+            targets=targets,
+            device=device,
+            parameter_working_set_bytes=parameter_working_set_bytes,
+            gradient_working_set_bytes=gradient_working_set_bytes,
+            activation_working_set_bytes=activation_working_set_bytes,
+            workspace_working_set_bytes=workspace_working_set_bytes,
+        )
+        maximum_parameter_group_bytes = hybrid.maximum_parameter_group_bytes
+        maximum_gradient_group_bytes = hybrid.maximum_gradient_group_bytes
+        parameter_budget_respected = hybrid.parameter_budget_respected
+        gradient_budget_respected = hybrid.gradient_budget_respected
+        maximum_retained_activation_bytes = hybrid.maximum_retained_activation_bytes
+        maximum_workspace_bytes = hybrid.maximum_workspace_bytes
+        retained_forward_boundary_count = hybrid.retained_forward_boundary_count
+        retained_forward_boundary_bytes = hybrid.retained_forward_boundary_bytes
+        total_prefix_replayed_groups = hybrid.total_prefix_replayed_groups
+        total_prefix_recomputation_seconds = hybrid.total_prefix_recomputation_seconds
+        activation_budget_respected = hybrid.activation_budget_respected
+        workspace_budget_respected = hybrid.workspace_budget_respected
+        backward_resident_loss = hybrid.resident_loss
+        bounded_loss = hybrid.recomputed_loss
+        resident_gradient_norm = hybrid.resident_gradient_norm
+        bounded_gradient_norm = hybrid.recomputed_gradient_norm
+        clipping_coefficient = hybrid.future_clip_coefficient
+        activation_plan_checksum = hybrid.activation_plan_checksum
+        activation_profile_checksum = hybrid.activation_profile_checksum
+        anchor_group_names = hybrid.anchor_group_names
+        maximum_replayed_groups = activation_plan.maximum_replayed_groups
+        replay_parameter_logical_bytes = (
+            hybrid.total_prefix_parameter_logical_bytes_read
+        )
+        replay_parameter_chunk_reads = hybrid.total_prefix_parameter_chunk_reads
+    elif config.training.activation_policy == "recompute":
         recomputed = run_activation_recompute_from_store(
             config,
             parameter_store=parameter_store,
@@ -196,6 +212,18 @@ def advance_one_step(
         resident_gradient_norm = recomputed.resident_gradient_norm
         bounded_gradient_norm = recomputed.recomputed_gradient_norm
         clipping_coefficient = recomputed.future_clip_coefficient
+        maximum_replayed_groups = max(
+            (
+                len(item.prefix_replay.replayed_group_names)
+                for item in recomputed.backward_groups
+                if item.prefix_replay is not None
+            ),
+            default=0,
+        )
+        replay_parameter_logical_bytes = (
+            recomputed.total_prefix_parameter_logical_bytes_read
+        )
+        replay_parameter_chunk_reads = recomputed.total_prefix_parameter_chunk_reads
     else:
         retained = run_bounded_backward_from_store(
             config,
@@ -261,11 +289,11 @@ def advance_one_step(
     groups = _optimizer_groups(execution_groups)
     candidate_parameter_store = VersionedTensorStore.create(
         candidate_parameter_store_path,
-        limits=_store_limits(config),
+        limits=parameter_store.limits,
     )
     candidate_optimizer_store = VersionedTensorStore.create(
         candidate_optimizer_store_path,
-        limits=_store_limits(config),
+        limits=optimizer_store.limits,
     )
 
     maximum_optimizer_group_bytes = 0
@@ -297,15 +325,11 @@ def advance_one_step(
             + second_moment_bytes
             + step_bytes
         )
-        maximum_optimizer_group_bytes = max(
-            maximum_optimizer_group_bytes,
-            logical_working_set,
-        )
+        maximum_optimizer_group_bytes = max(maximum_optimizer_group_bytes, logical_working_set)
         if logical_working_set > optimizer_working_set_bytes:
             raise OptimizerWorkingSetExceededError(
                 f"optimizer group {group.name} requires {logical_working_set} bytes"
             )
-
         parameter_payloads, parameter_read_seconds = _read_payloads(
             parameter_store,
             parameter_group_records,
@@ -340,7 +364,6 @@ def advance_one_step(
         process_rss = process_rss_bytes()
         updated_parameter_checksum = _payload_digest(updated_parameters)
         updated_optimizer_checksum = _payload_digest(updated_optimizer)
-
         parameter_commit_started = time.perf_counter()
         parameter_commit = _commit_versioned_payloads(
             candidate_parameter_store,
@@ -362,7 +385,6 @@ def advance_one_step(
         optimizer_commit_seconds = time.perf_counter() - optimizer_commit_started
         if "model.token_embedding.weight" in group.tensor_names:
             tied_updates += 1
-
         release_started = time.perf_counter()
         del (
             parameter_payloads,
@@ -424,7 +446,6 @@ def advance_one_step(
         )
     )
     resident_vs_candidate = compare_states(oracle_state, candidate_state)
-
     restored_model = DecoderOnlyTransformer(config.model).to(device)
     restored_optimizer = torch.optim.AdamW(
         restored_model.parameters(),
@@ -474,6 +495,9 @@ def advance_one_step(
         oracle_state_store_path=str(oracle_state_store_path),
         bounded_backward_result_path=str(backward_result_path),
         activation_policy=config.training.activation_policy,
+        activation_plan_checksum=activation_plan_checksum,
+        activation_profile_checksum=activation_profile_checksum,
+        activation_anchor_group_names=anchor_group_names,
         parameter_working_set_budget_bytes=parameter_working_set_bytes,
         gradient_working_set_budget_bytes=gradient_working_set_bytes,
         optimizer_working_set_budget_bytes=optimizer_working_set_bytes,
@@ -486,7 +510,10 @@ def advance_one_step(
         maximum_workspace_bytes=maximum_workspace_bytes,
         retained_forward_boundary_count=retained_forward_boundary_count,
         retained_forward_boundary_bytes=retained_forward_boundary_bytes,
+        maximum_replayed_groups=maximum_replayed_groups,
         total_prefix_replayed_groups=total_prefix_replayed_groups,
+        total_prefix_parameter_logical_bytes_read=replay_parameter_logical_bytes,
+        total_prefix_parameter_chunk_reads=replay_parameter_chunk_reads,
         total_prefix_recomputation_seconds=total_prefix_recomputation_seconds,
         parameter_budget_respected=parameter_budget_respected,
         gradient_budget_respected=gradient_budget_respected,
@@ -496,8 +523,8 @@ def advance_one_step(
         workspace_budget_respected=workspace_budget_respected,
         resident_loss=resident_loss,
         bounded_loss=bounded_loss,
-        resident_gradient_norm=resident_gradient_norm,
         loss_absolute_difference=abs(resident_loss - bounded_loss),
+        resident_gradient_norm=resident_gradient_norm,
         bounded_gradient_norm=bounded_gradient_norm,
         gradient_norm_absolute_difference=abs(
             resident_gradient_norm - bounded_gradient_norm
