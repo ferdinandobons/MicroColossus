@@ -64,7 +64,9 @@ jobs:
           microcolossus bounded-step --help
           microcolossus-bounded-train --help
           microcolossus plan --config examples/tiny-mps.yaml
+          microcolossus plan --config examples/real-text-micro.yaml
           microcolossus train --config examples/tiny-resident.yaml --steps 1 --device cpu
+          microcolossus train --config examples/real-text-micro.yaml --steps 2 --device cpu
           microcolossus benchmark \
             --config examples/tiny-resident.yaml \
             --backend pytorch \
@@ -125,4 +127,16 @@ jobs:
             --bundle-store /tmp/microcolossus-bounded-training-bundle \
             --target-step 3 \
             --output /tmp/microcolossus-bounded-training-step-3.json \
+            --device cpu
+          microcolossus-bounded-train \
+            --config examples/real-text-micro.yaml \
+            --bundle-store /tmp/microcolossus-real-text-bundle \
+            --target-step 1 \
+            --output /tmp/microcolossus-real-text-step-1.json \
+            --device cpu
+          microcolossus-bounded-train \
+            --config examples/real-text-micro.yaml \
+            --bundle-store /tmp/microcolossus-real-text-bundle \
+            --target-step 2 \
+            --output /tmp/microcolossus-real-text-step-2.json \
             --device cpu
