@@ -681,9 +681,10 @@ def run_activation_recompute_validation(
 
         output_activation_bytes = _activation_bytes(output)
         if local_input is not None:
-            if local_input.grad is None:
+            gradient_value = local_input.grad
+            if gradient_value is None:
                 raise RuntimeError(f"missing upstream gradient after {spec.name}")
-            next_upstream: Tensor | None = local_input.grad.detach().cpu().contiguous()
+            next_upstream: Tensor | None = gradient_value.detach().cpu().contiguous()
             outgoing_gradient_bytes = _activation_bytes(next_upstream)
         else:
             next_upstream = None
