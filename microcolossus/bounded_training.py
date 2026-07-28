@@ -178,12 +178,23 @@ def run_bounded_training(
     parameter_working_set_bytes: int = 1024**2,
     gradient_working_set_bytes: int = 1024**2,
     optimizer_working_set_bytes: int = 4 * 1024**2,
+    activation_working_set_bytes: int = 1024**2,
+    workspace_working_set_bytes: int = 4 * 1024**2,
     bundle_failure_injector: BundleFailureInjector | None = None,
 ) -> BoundedTrainingResult:
     """Advance a persistent bounded training root to ``target_step``."""
 
     if target_step < 0:
         raise ValueError("target_step cannot be negative")
+    for value, name in (
+        (parameter_working_set_bytes, "parameter_working_set_bytes"),
+        (gradient_working_set_bytes, "gradient_working_set_bytes"),
+        (optimizer_working_set_bytes, "optimizer_working_set_bytes"),
+        (activation_working_set_bytes, "activation_working_set_bytes"),
+        (workspace_working_set_bytes, "workspace_working_set_bytes"),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be greater than zero")
     data_source = _prepare_data_source_for_run(config)
     destination = Path(bundle_store_path)
     initialization_publication: BundlePublicationTelemetry | None = None
@@ -227,6 +238,8 @@ def run_bounded_training(
             parameter_working_set_bytes=parameter_working_set_bytes,
             gradient_working_set_bytes=gradient_working_set_bytes,
             optimizer_working_set_bytes=optimizer_working_set_bytes,
+            activation_working_set_bytes=activation_working_set_bytes,
+            workspace_working_set_bytes=workspace_working_set_bytes,
             bundle_failure_injector=bundle_failure_injector,
         )
         step_results.append(step)
@@ -286,6 +299,9 @@ def run_bounded_training(
         resumed=resumed,
         initialized_bundle_id=initialized_bundle_id,
         initialization_publication=initialization_publication,
+        activation_policy=config.training.activation_policy,
+        activation_working_set_budget_bytes=activation_working_set_bytes,
+        workspace_working_set_budget_bytes=workspace_working_set_bytes,
         steps=tuple(step_results),
         lineage=lineage,
         progress_records=progress,
@@ -295,6 +311,24 @@ def run_bounded_training(
         final_bundle_vs_restored_state=current_vs_restored,
         final_batch_cursor=current.committed_step,
         optimizer_step_values=optimizer_steps,
+        maximum_retained_activation_bytes=max(
+            (item.maximum_retained_activation_bytes for item in step_results),
+            default=0,
+        ),
+        maximum_workspace_bytes=max(
+            (item.maximum_workspace_bytes for item in step_results),
+            default=0,
+        ),
+        maximum_retained_forward_boundary_bytes=max(
+            (item.retained_forward_boundary_bytes for item in step_results),
+            default=0,
+        ),
+        total_prefix_replayed_groups=sum(
+            item.total_prefix_replayed_groups for item in step_results
+        ),
+        total_prefix_recomputation_seconds=sum(
+            item.total_prefix_recomputation_seconds for item in step_results
+        ),
         total_parameter_logical_bytes_read=sum(
             item.total_parameter_logical_bytes_read for item in step_results
         ),
