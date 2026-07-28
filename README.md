@@ -8,11 +8,11 @@ The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 
 - **MLX** is the preferred optimized Apple Silicon execution candidate.
 - **PyTorch MPS** is the numerical oracle and reference for validation, debugging, state comparison, and recovery semantics.
-- Tensor storage, transactions, root checkpoints, data provenance, and execution plans remain backend-neutral.
+- Tensor storage, transactions, root checkpoints, data provenance, execution plans, and activation policies remain backend-neutral where practical.
 
-MicroColossus does not yet claim full out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed gradient norm, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level checkpoint resume, and a deterministic real-text learning trajectory on the target M2.
+MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed gradient norm, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, and safe checkpoint pruning on the target M2.
 
-Version **0.11.0** adds explicit safe pruning and checkpoint compaction. The CPU implementation is complete. Clean Apple M2 filesystem validation remains required before the pruning milestone is accepted as target evidence.
+Version **0.12.0** adds persistent multi-step activation recomputation. The CPU implementation and regression suite are the release gate before Apple M2 validation.
 
 ## Why Apple Silicon changes the design
 
@@ -21,7 +21,7 @@ Apple Silicon uses one unified physical memory pool. CPU tensors, accelerator te
 Project rules:
 
 - CPU-to-MPS placement is not capacity offload.
-- RSS, MPS, driver, and MLX allocator counters overlap or describe different scopes.
+- RSS, MPS, Metal-driver, and MLX allocator counters overlap or describe different scopes.
 - Those counters are never added as separate physical memories.
 - NVMe is the first capacity tier outside unified memory.
 - Memory pressure, swap, storage traffic, elapsed time, recovery, and cumulative writes are first-class metrics.
@@ -31,7 +31,7 @@ MLX or MPS active working set
               |
 bounded unified-memory staging and activations
               |
-versioned NVMe tensor state
+versioned storage-backed tensor state
 ```
 
 ## Current architecture
@@ -48,7 +48,7 @@ versioned NVMe tensor state
 - PyTorch model and AdamW export and restore;
 - MLX model and optimizer-tree export and restore.
 
-### Bounded training step
+### One bounded optimizer step
 
 ```text
 parameter-group forward
@@ -86,28 +86,63 @@ bundle step 0
 
 Every step consumes parameter and Adam state referenced by the current root bundle. A later process can reopen the same directory and continue from `CURRENT` without rebuilding state from initialization.
 
-The committed root step is the authoritative next-batch cursor. Configuration provenance, root lineage, batch checksums, tensor versions, and optimizer step values are verified on resume.
+The committed root step is the authoritative next-batch cursor. Configuration provenance, root lineage, batch checksums, tensor versions, optimizer steps, and data identity are verified on resume.
+
+### Activation policies
+
+Version 0.12 introduces:
+
+```text
+training.activation_policy: retain_all
+training.activation_policy: recompute
+```
+
+`retain_all` keeps every non-final forward boundary on CPU until its reverse group executes.
+
+`recompute` keeps zero forward boundaries for later backward use. Each reverse group reconstructs its input by replaying the deterministic prefix from token IDs and the authoritative parameter store.
+
+```text
+final-head backward
+    replay embedding and all Transformer blocks
+
+block K backward
+    replay embedding through block K-1
+
+embedding backward
+    use token IDs directly
+```
+
+The first recomputation algorithm is synchronous and intentionally favors numerical isolation over throughput. It can replay a quadratic number of groups. Future hybrid policies will retain selected anchors based on measured memory and replay cost.
+
+Separate logical budgets now cover:
+
+- parameters;
+- gradients;
+- optimizer state;
+- retained activations;
+- local forward or backward workspace.
+
+The activation policy is part of checkpoint identity. A `retain_all` root cannot silently resume as `recompute`, or the reverse.
 
 ### Deterministic real-text frontend
 
-Version 0.10 introduced:
+The current data frontend provides:
 
 - local UTF-8 corpus files;
 - a fixed byte tokenizer with vocabulary size 256;
-- checksummed train and validation data identity;
-- deterministic train and validation split;
-- deterministic random-access text windows;
-- byte offsets, seeds, and checksums for consumed batches;
+- checksummed train and validation identity;
+- deterministic split and random-access text windows;
+- byte offsets, seeds, and batch checksums;
 - validation loss at committed checkpoints;
 - deterministic greedy sample generation;
 - atomic progress records tied to root bundle IDs;
 - resume rejection when corpus bytes or declared data semantics change.
 
-The first tokenizer is deliberately simple. It removes external vocabulary and download dependencies while the storage and resume semantics are validated. It is not presented as the final tokenizer for model quality.
+The byte tokenizer is an engineering reference, not a final tokenizer for model quality.
 
 ### Safe checkpoint pruning
 
-Version 0.11 introduces an explicit two-stage workflow:
+Version 0.11 established:
 
 ```text
 dry-run plan
@@ -122,21 +157,42 @@ explicit apply
     -> keep CURRENT byte-identical
 ```
 
-The retention policy can keep:
+The retention policy can preserve:
 
 - `CURRENT`;
-- a configured number of immediately previous checkpoints;
-- optional milestone checkpoints at a fixed interval.
+- a declared number of previous checkpoints;
+- optional milestone checkpoints.
 
-All root bundle manifests remain as lightweight lineage metadata. Only selected retained checkpoints keep their parameter, optimizer, and gradient child stores. A historical checkpoint whose child state was pruned cannot be restored later merely by changing the retention policy.
+All root bundle manifests remain as lightweight lineage metadata. Only selected checkpoints keep materialized parameter, optimizer, and gradient child stores.
 
-Pruning is conservative and manual by default. There is no automatic background deletion in version 0.11.
+The corrected Apple M2/APFS validation demonstrated:
+
+- deterministic plans;
+- byte-identical `CURRENT`;
+- safe interruption continuation;
+- idempotent repeated apply;
+- MPS resume after pruning;
+- micro reclamation of `10,739,392` managed bytes;
+- small-model reclamation of `289,540,389` selected bytes;
+- no hidden CPU fallback or non-finite values;
+- clean source state.
 
 ## Accepted Apple M2 evidence
 
-### Competitive resident baseline
+| Capability | Result |
+|---|---|
+| Resident MPS forward, backward, and AdamW | PASS |
+| PyTorch MPS versus MLX resident benchmark | PASS, dual backend selected |
+| Versioned tensor store and recovery | PASS |
+| Group-bounded forward | PASS |
+| Group-bounded backward and gradient store | PASS |
+| Group-bounded AdamW and atomic root publication | PASS |
+| Persistent multi-step and process resume | PASS |
+| Deterministic real-text micro and 1.85M training | PASS |
+| Safe pruning and post-pruning resume | PASS |
+| Persistent activation recomputation | CPU gate in progress, M2 gate pending |
 
-A controlled 23,213,056-parameter resident workload produced:
+The controlled resident 23,213,056-parameter benchmark produced:
 
 | Variant | Median tokens/s | Relative to PyTorch |
 |---|---:|---:|
@@ -144,97 +200,17 @@ A controlled 23,213,056-parameter resident workload produced:
 | PyTorch MPS checkpointed | 1,337.37 | 0.970x |
 | MLX | 2,195.69 | 1.592x |
 
-The decision remains **dual backend**. MLX is the optimized execution candidate. PyTorch remains the numerical oracle.
-
-### Storage and bounded execution
-
-Clean target runs on the 8 GB M2 validated:
-
-- exact storage-backed model and optimizer round trips;
-- PyTorch and MLX canonical adapters;
-- tensor-store failure injection and recovery;
-- bounded forward with zero tested boundary, logits, and loss differences;
-- bounded backward with exact tested gradients;
-- streamed global gradient norm;
-- group-bounded AdamW;
-- exact candidate restore;
-- atomic root publication;
-- parameter, gradient, and optimizer budget rejection;
-- no detected hidden CPU fallback or non-finite values.
-
-### Persistent resume in 0.9
-
-Accepted runtime commit:
-
-```text
-4b1ffb20857dd948d7737484e62b007f24bf69b9
-```
-
-Validated results:
-
-- micro uninterrupted training from step 0 to step 5: GREEN;
-- a new process resumed the same root from step 2 to step 5: GREEN;
-- uninterrupted and resumed final canonical states: BITWISE_EXACT;
-- tiny training from step 0 to step 3: GREEN;
-- maximum per-step loss difference: `0.0`;
-- maximum gradient-norm difference: `1.6985336648289717e-07`;
-- maximum final bounded-versus-resident absolute difference: `7.450580596923828e-09`;
-- candidate restore exactness: true;
-- later-step interruption preserved the previous bundle;
-- configuration mismatch was rejected;
-- corrupted authoritative state was detected;
-- swap delta was zero;
-- final source tree was clean.
-
-### Real-text training in 0.10
-
-Accepted runtime commit:
-
-```text
-8bc277123267c3d3f15bf60cd640819fa823d2e3
-```
-
-The external report initially labeled the release `FAIL` because the validation prompt expected 11,456 parameters for `real-text-micro.yaml`. The checked configuration correctly contains 18,624 parameters because the byte tokenizer requires a 256-token embedding and the model has a 64-position table. The stale value belonged to the older synthetic micro configuration. No runtime command or integrity gate failed because of this difference.
-
-Accepted target results after correcting that protocol expectation:
-
-- native Apple M2 MPS execution with fallback unset;
-- Ruff, mypy, 88 tests with one skip, compileall, and doctor passed;
-- data identity matched between independent processes;
-- UTF-8 byte-tokenizer round trip passed;
-- micro uninterrupted training reached step 20: GREEN;
-- micro validation loss decreased from `5.548418998718262` to `3.302267074584961`;
-- a new process resumed the micro root from step 5 to step 20: GREEN;
-- uninterrupted-versus-resumed state was `NUMERICALLY_STABLE`;
-- maximum resumed-state absolute difference was `1.1920928955078125e-07`;
-- mean resumed-state absolute difference was `8.844825718731097e-10`;
-- cursors, seeds, offsets, batch checksums, sample token IDs, and sample completion matched;
-- corpus mutation was rejected before step 3 became authoritative;
-- the 1,846,656-parameter small model reached step 10: GREEN;
-- small validation loss decreased from `5.687370777130127` to `4.083975553512573`;
-- candidate restore was exact for micro and small runs;
-- root and child-store verification and recovery passed;
-- no runtime fallback, unsupported operation, non-finite value, or unexpected command failure remained after scanner audit;
-- final source tree was clean.
-
-The small training root occupied about 632 MB after ten steps because historical candidates and work stores were retained. That result motivated the 0.11 pruning milestone.
+MLX remains the optimized execution candidate. PyTorch remains the numerical and recovery oracle.
 
 ## Development scale ladder
 
 1. **Unit scale**. Bytes, tensors, operators, corruption, and failure injection.
-2. **Synthetic micro model**. 11,456 parameters for fast storage and numerical paths.
-3. **Real-text micro model**. 18,624 parameters for tokenizer, data provenance, validation, samples, resume, and pruning diagnostics.
-4. **Tiny model**. 443,648 parameters for target-hardware numerical gates.
-5. **Small real model**. Approximately 1M to 5M parameters for a real learning trajectory and filesystem reclamation gate.
+2. **Synthetic micro**. 11,456 parameters for rapid numerical and storage tests.
+3. **Real-text micro**. 18,624 parameters for data provenance, validation, samples, resume, pruning, and activation-policy diagnostics.
+4. **Tiny**. 443,648 parameters for target-hardware numerical gates.
+5. **Small real model**. 1,846,656 parameters for meaningful M2 learning, reclamation, and activation-memory comparisons.
 6. **Milestone scale**. Larger workloads after the same path is correct at smaller scales.
-7. **Capacity demonstrations**. 124M, 350M, and later targets after activation and tiling work.
-
-Included real-text examples:
-
-| Configuration | Parameters | Purpose |
-|---|---:|---|
-| `examples/real-text-micro.yaml` | 18,624 | deterministic resume, validation, samples, and fast pruning diagnostics |
-| `examples/real-text-small.yaml` | 1,846,656 | first meaningful Apple M2 real-text and storage-reclamation trajectory |
+7. **Capacity demonstrations**. 124M and 350M after activation scheduling and intra-layer tiling.
 
 The included corpus is original project text used as an engineering fixture. It is not a representative language-model dataset.
 
@@ -255,117 +231,101 @@ python -m pip install -e ".[dev,benchmark]"
 
 ## Run
 
-Environment and static plan:
+Inspect the target and static plan:
 
 ```bash
 microcolossus doctor
-microcolossus plan --config examples/real-text-micro.yaml
-microcolossus plan --config examples/real-text-small.yaml
+microcolossus plan --config examples/real-text-micro-recompute.yaml
 ```
 
-Resident real-text baseline:
-
-```bash
-microcolossus train \
-  --config examples/real-text-micro.yaml \
-  --steps 20 \
-  --device cpu
-```
-
-Persistent bounded real-text training:
+Persistent `retain_all` training:
 
 ```bash
 microcolossus-bounded-train \
   --config examples/real-text-micro.yaml \
-  --bundle-store runs/real-text-training \
+  --bundle-store runs/retain-all \
+  --target-step 5 \
+  --output runs/retain-all-step-5.json \
+  --device mps \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1 \
+  --optimizer-working-set-mib 4 \
+  --activation-working-set-mib 1 \
+  --workspace-working-set-mib 4
+```
+
+Persistent recomputation:
+
+```bash
+microcolossus-bounded-train \
+  --config examples/real-text-micro-recompute.yaml \
+  --bundle-store runs/recompute \
+  --target-step 5 \
+  --output runs/recompute-step-5.json \
+  --device mps \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1 \
+  --optimizer-working-set-mib 4 \
+  --activation-working-set-mib 1 \
+  --workspace-working-set-mib 4
+```
+
+Resume the same recomputation root:
+
+```bash
+microcolossus-bounded-train \
+  --config examples/real-text-micro-recompute.yaml \
+  --bundle-store runs/recompute \
   --target-step 10 \
-  --output runs/real-text-step-10.json \
-  --device cpu
+  --output runs/recompute-step-10.json \
+  --device mps \
+  --parameter-working-set-mib 1 \
+  --gradient-working-set-mib 1 \
+  --optimizer-working-set-mib 4 \
+  --activation-working-set-mib 1 \
+  --workspace-working-set-mib 4
 ```
 
-Resume the same root in a later process:
-
-```bash
-microcolossus-bounded-train \
-  --config examples/real-text-micro.yaml \
-  --bundle-store runs/real-text-training \
-  --target-step 20 \
-  --output runs/real-text-step-20.json \
-  --device cpu
-```
-
-Progress records are written under:
-
-```text
-runs/real-text-training/metrics/
-```
-
-Create a non-mutating pruning plan:
+Create and apply an explicit pruning plan:
 
 ```bash
 microcolossus-prune plan \
-  --config examples/real-text-micro.yaml \
-  --bundle-store runs/real-text-training \
-  --output runs/pruning-plan.json
-```
+  --config examples/real-text-micro-recompute.yaml \
+  --bundle-store runs/recompute \
+  --output runs/recompute-pruning-plan.json
 
-Inspect the plan, then apply it explicitly:
-
-```bash
 microcolossus-prune apply \
-  --config examples/real-text-micro.yaml \
-  --bundle-store runs/real-text-training \
-  --plan runs/pruning-plan.json \
-  --output runs/pruning-report.json
+  --config examples/real-text-micro-recompute.yaml \
+  --bundle-store runs/recompute \
+  --plan runs/recompute-pruning-plan.json \
+  --output runs/recompute-pruning-report.json
 ```
-
-## Version 0.11 validation status
-
-Implemented in CPU paths:
-
-- retention policy parsing;
-- deterministic and non-mutating dry-run plans;
-- exact deletion-target inventories and plan checksums;
-- explicit apply with atomic journal;
-- byte-identical `CURRENT` invariant;
-- pre- and post-deletion retained-checkpoint verification;
-- candidate, work, oracle, temporary, orphan, and unpublished-state removal;
-- interruption recovery;
-- idempotent repeated apply;
-- resume after pruning;
-- corruption rejection for retained state;
-- training exclusion while pruning owns the root;
-- Python 3.11 and 3.13 CI coverage.
-
-The release is not accepted as target evidence until a clean Apple M2 filesystem protocol confirms material reclamation and post-pruning resume.
 
 ## Current boundary
 
 Not yet established:
 
-- accepted Apple M2 validation of pruning and compaction;
-- live chunk repacking across retained stores;
-- deduplication across independent store directories;
-- automatic periodic pruning;
-- representative tokenizer or corpus quality;
-- production model quality;
-- persisted large-dataset shards, epochs, and shuffle state;
-- activation recomputation from storage or activation offload;
-- strict total-memory-pressure enforcement;
-- asynchronous prefetch and writeback;
+- accepted Apple M2 comparison of persistent `retain_all` and `recompute`;
+- hybrid activation-anchor scheduling;
+- activation tensors stored on disk;
+- asynchronous activation prefetch or writeback;
+- direct-I/O or NVMe-specific performance behavior;
+- strict physical total-memory-pressure enforcement;
 - intra-layer tiling;
 - bounded MLX backward and optimizer execution;
+- representative tokenizer or production corpus quality;
 - training state larger than safe resident unified memory;
 - 124M or 350M full-parameter training on the target Mac.
 
-No full out-of-core, performance-at-scale, or production model-quality claim is made yet.
+No complete out-of-core, performance-at-scale, or production model-quality claim is made.
 
 ## Next engineering milestones
 
-1. validate pruning and resume on the target Apple M2 filesystem;
-2. implement activation recomputation, optional activation offload, and strict total-memory-pressure budgets;
-3. add a larger and more representative corpus and tokenizer adapter after runtime semantics remain stable;
-4. add performance overlap only after the synchronous reference path stays numerically and transactionally correct.
+1. validate persistent `retain_all` versus `recompute` on Apple M2;
+2. use measured replay and memory curves to implement hybrid activation anchors;
+3. add optional activation storage only after the synchronous reference remains correct;
+4. add intra-layer tiling for groups that individually exceed memory budgets;
+5. add performance overlap after correctness, recovery, and endurance remain stable.
 
 ## Engineering policy
 
@@ -379,7 +339,7 @@ An optimization is accepted only when it improves a declared objective without v
 - reproducibility;
 - observability.
 
-Full-parameter training is reported separately from LoRA, QLoRA, low-rank optimizer methods, quantized optimizer state, and adapter training.
+Full-parameter training is reported separately from LoRA, QLoRA, quantized optimizer state, low-rank optimizers, and adapter training.
 
 ## Documentation
 
@@ -388,6 +348,7 @@ Full-parameter training is reported separately from LoRA, QLoRA, low-rank optimi
 - [`docs/multistep.md`](docs/multistep.md)
 - [`docs/real-text.md`](docs/real-text.md)
 - [`docs/pruning.md`](docs/pruning.md)
+- [`docs/activations.md`](docs/activations.md)
 - [`docs/validation.md`](docs/validation.md)
 - [`docs/competitive.md`](docs/competitive.md)
 

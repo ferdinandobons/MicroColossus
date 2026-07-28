@@ -10,6 +10,10 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from .activation_recompute import (
+    ActivationWorkingSetExceededError,
+    WorkspaceWorkingSetExceededError,
+)
 from .bounded_backward import _batch_checksum
 from .bounded_forward import build_execution_groups
 from .bounded_optimizer import (
@@ -30,6 +34,7 @@ from .bounded_training_types import PersistentStepResult
 from .config import ExperimentConfig
 from .model import DecoderOnlyTransformer
 from .persistent_backward import run_bounded_backward_from_store
+from .persistent_recompute import run_activation_recompute_from_store
 from .step_bundle import (
     BundleFailureInjector,
     StepBundleManifest,
@@ -114,6 +119,19 @@ def _commit_versioned_payloads(
     return transaction.commit().telemetry
 
 
+def _retain_all_workspace_bytes(backward_groups: tuple[object, ...]) -> int:
+    maximum = 0
+    for item in backward_groups:
+        required = (
+            int(getattr(item, "input_activation_bytes"))
+            + int(getattr(item, "output_activation_bytes"))
+            + int(getattr(item, "incoming_activation_gradient_bytes"))
+            + int(getattr(item, "outgoing_activation_gradient_bytes"))
+        )
+        maximum = max(maximum, required)
+    return maximum
+
+
 def advance_one_step(
     config: ExperimentConfig,
     *,
@@ -124,6 +142,8 @@ def advance_one_step(
     parameter_working_set_bytes: int,
     gradient_working_set_bytes: int,
     optimizer_working_set_bytes: int,
+    activation_working_set_bytes: int,
+    workspace_working_set_bytes: int,
     bundle_failure_injector: BundleFailureInjector | None,
 ) -> PersistentStepResult:
     next_step = current.committed_step + 1
@@ -134,7 +154,7 @@ def advance_one_step(
     attempt = f"step-{next_step}-{uuid.uuid4().hex}"
     work = bundle_store.root / "work" / attempt
     candidates = bundle_store.root / "candidates" / attempt
-    backward_result_path = work / "bounded-backward.json"
+    backward_result_path = work / f"{config.training.activation_policy}-backward.json"
     oracle_gradient_store_path = work / "oracle-gradients"
     gradient_store_path = work / "bounded-gradients"
     oracle_state_store_path = work / "oracle-state"
@@ -143,18 +163,82 @@ def advance_one_step(
 
     parameter_store = _open_referenced_store(bundle_store, current, kind="parameter")
     optimizer_store = _open_referenced_store(bundle_store, current, kind="optimizer")
-    backward = run_bounded_backward_from_store(
-        config,
-        parameter_store=parameter_store,
-        oracle_gradient_store_path=oracle_gradient_store_path,
-        gradient_store_path=gradient_store_path,
-        output_path=backward_result_path,
-        input_ids=input_ids,
-        targets=targets,
-        device=device,
-        parameter_working_set_bytes=parameter_working_set_bytes,
-        gradient_working_set_bytes=gradient_working_set_bytes,
-    )
+
+    if config.training.activation_policy == "recompute":
+        recomputed = run_activation_recompute_from_store(
+            config,
+            parameter_store=parameter_store,
+            oracle_gradient_store_path=oracle_gradient_store_path,
+            gradient_store_path=gradient_store_path,
+            output_path=backward_result_path,
+            input_ids=input_ids,
+            targets=targets,
+            device=device,
+            parameter_working_set_bytes=parameter_working_set_bytes,
+            gradient_working_set_bytes=gradient_working_set_bytes,
+            activation_working_set_bytes=activation_working_set_bytes,
+            workspace_working_set_bytes=workspace_working_set_bytes,
+        )
+        maximum_parameter_group_bytes = recomputed.maximum_parameter_group_bytes
+        maximum_gradient_group_bytes = recomputed.maximum_gradient_group_bytes
+        parameter_budget_respected = recomputed.parameter_budget_respected
+        gradient_budget_respected = recomputed.gradient_budget_respected
+        maximum_retained_activation_bytes = recomputed.maximum_retained_activation_bytes
+        maximum_workspace_bytes = recomputed.maximum_workspace_bytes
+        retained_forward_boundary_count = recomputed.retained_forward_boundary_count
+        retained_forward_boundary_bytes = recomputed.retained_forward_boundary_bytes
+        total_prefix_replayed_groups = recomputed.total_prefix_replayed_groups
+        total_prefix_recomputation_seconds = recomputed.total_prefix_recomputation_seconds
+        activation_budget_respected = recomputed.activation_budget_respected
+        workspace_budget_respected = recomputed.workspace_budget_respected
+        backward_resident_loss = recomputed.resident_loss
+        bounded_loss = recomputed.recomputed_loss
+        resident_gradient_norm = recomputed.resident_gradient_norm
+        bounded_gradient_norm = recomputed.recomputed_gradient_norm
+        clipping_coefficient = recomputed.future_clip_coefficient
+    else:
+        retained = run_bounded_backward_from_store(
+            config,
+            parameter_store=parameter_store,
+            oracle_gradient_store_path=oracle_gradient_store_path,
+            gradient_store_path=gradient_store_path,
+            output_path=backward_result_path,
+            input_ids=input_ids,
+            targets=targets,
+            device=device,
+            parameter_working_set_bytes=parameter_working_set_bytes,
+            gradient_working_set_bytes=gradient_working_set_bytes,
+        )
+        maximum_parameter_group_bytes = retained.maximum_parameter_group_bytes
+        maximum_gradient_group_bytes = retained.maximum_gradient_group_bytes
+        parameter_budget_respected = retained.parameter_budget_respected
+        gradient_budget_respected = retained.gradient_budget_respected
+        maximum_retained_activation_bytes = retained.retained_cpu_activation_bytes
+        maximum_workspace_bytes = _retain_all_workspace_bytes(retained.backward_groups)
+        retained_forward_boundary_count = max(0, len(retained.forward_groups) - 1)
+        retained_forward_boundary_bytes = retained.retained_cpu_activation_bytes
+        total_prefix_replayed_groups = 0
+        total_prefix_recomputation_seconds = 0.0
+        if maximum_retained_activation_bytes > activation_working_set_bytes:
+            raise ActivationWorkingSetExceededError(
+                "retain-all boundaries require "
+                f"{maximum_retained_activation_bytes} activation bytes but the budget is "
+                f"{activation_working_set_bytes} bytes"
+            )
+        if maximum_workspace_bytes > workspace_working_set_bytes:
+            raise WorkspaceWorkingSetExceededError(
+                "retain-all local backward requires "
+                f"{maximum_workspace_bytes} workspace bytes but the budget is "
+                f"{workspace_working_set_bytes} bytes"
+            )
+        activation_budget_respected = True
+        workspace_budget_respected = True
+        backward_resident_loss = retained.resident_loss
+        bounded_loss = retained.bounded_loss
+        resident_gradient_norm = retained.resident_gradient_norm
+        bounded_gradient_norm = retained.bounded_gradient_norm
+        clipping_coefficient = retained.future_clip_coefficient
+
     gradient_store = VersionedTensorStore.open(gradient_store_path)
     resident_loss, _ = _resident_oracle_from_current_state(
         config,
@@ -164,9 +248,11 @@ def advance_one_step(
         input_ids=input_ids,
         targets=targets,
         device=device,
-        clipping_coefficient=backward.future_clip_coefficient,
+        clipping_coefficient=clipping_coefficient,
         committed_step=next_step,
     )
+    if abs(resident_loss - backward_resident_loss) > 1e-5:
+        raise RuntimeError("resident optimizer oracle loss differs from backward oracle loss")
 
     parameter_records = _parameter_records(parameter_store)
     gradient_records = _gradient_records(gradient_store)
@@ -247,7 +333,7 @@ def advance_one_step(
             parameter_payloads=parameter_payloads,
             gradient_payloads=gradient_payloads,
             optimizer_payloads=optimizer_payloads,
-            clipping_coefficient=backward.future_clip_coefficient,
+            clipping_coefficient=clipping_coefficient,
             device=device,
         )
         accelerator_after_optimizer = accelerator_memory_metrics(device)
@@ -387,24 +473,36 @@ def advance_one_step(
         candidate_optimizer_store_path=str(candidate_optimizer_store_path),
         oracle_state_store_path=str(oracle_state_store_path),
         bounded_backward_result_path=str(backward_result_path),
+        activation_policy=config.training.activation_policy,
         parameter_working_set_budget_bytes=parameter_working_set_bytes,
         gradient_working_set_budget_bytes=gradient_working_set_bytes,
         optimizer_working_set_budget_bytes=optimizer_working_set_bytes,
-        maximum_parameter_group_bytes=backward.maximum_parameter_group_bytes,
-        maximum_gradient_group_bytes=backward.maximum_gradient_group_bytes,
+        activation_working_set_budget_bytes=activation_working_set_bytes,
+        workspace_working_set_budget_bytes=workspace_working_set_bytes,
+        maximum_parameter_group_bytes=maximum_parameter_group_bytes,
+        maximum_gradient_group_bytes=maximum_gradient_group_bytes,
         maximum_optimizer_group_bytes=maximum_optimizer_group_bytes,
-        parameter_budget_respected=backward.parameter_budget_respected,
-        gradient_budget_respected=backward.gradient_budget_respected,
-        optimizer_budget_respected=maximum_optimizer_group_bytes <= optimizer_working_set_bytes,
+        maximum_retained_activation_bytes=maximum_retained_activation_bytes,
+        maximum_workspace_bytes=maximum_workspace_bytes,
+        retained_forward_boundary_count=retained_forward_boundary_count,
+        retained_forward_boundary_bytes=retained_forward_boundary_bytes,
+        total_prefix_replayed_groups=total_prefix_replayed_groups,
+        total_prefix_recomputation_seconds=total_prefix_recomputation_seconds,
+        parameter_budget_respected=parameter_budget_respected,
+        gradient_budget_respected=gradient_budget_respected,
+        optimizer_budget_respected=maximum_optimizer_group_bytes
+        <= optimizer_working_set_bytes,
+        activation_budget_respected=activation_budget_respected,
+        workspace_budget_respected=workspace_budget_respected,
         resident_loss=resident_loss,
-        bounded_loss=backward.bounded_loss,
-        resident_gradient_norm=backward.resident_gradient_norm,
-        loss_absolute_difference=abs(resident_loss - backward.bounded_loss),
-        bounded_gradient_norm=backward.bounded_gradient_norm,
+        bounded_loss=bounded_loss,
+        resident_gradient_norm=resident_gradient_norm,
+        loss_absolute_difference=abs(resident_loss - bounded_loss),
+        bounded_gradient_norm=bounded_gradient_norm,
         gradient_norm_absolute_difference=abs(
-            backward.resident_gradient_norm - backward.bounded_gradient_norm
+            resident_gradient_norm - bounded_gradient_norm
         ),
-        clipping_coefficient=backward.future_clip_coefficient,
+        clipping_coefficient=clipping_coefficient,
         optimizer_group_order=tuple(item.name for item in optimizer_metrics),
         optimizer_groups=tuple(optimizer_metrics),
         tied_parameter_update_count=tied_updates,

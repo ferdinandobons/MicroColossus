@@ -78,6 +78,7 @@ class TrainingConfig:
     seed: int = 42
     device: str = "auto"
     mode: str = "reference"
+    activation_policy: str = "retain_all"
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -95,6 +96,10 @@ class TrainingConfig:
             raise ValueError("device must be one of: auto, cpu, cuda, mps")
         if self.mode != "reference":
             raise ValueError("only reference mode is implemented")
+        if self.activation_policy not in {"retain_all", "recompute"}:
+            raise ValueError(
+                "training.activation_policy must be one of: retain_all, recompute"
+            )
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> TrainingConfig:

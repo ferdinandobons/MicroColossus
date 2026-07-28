@@ -27,9 +27,10 @@ from .storage.adapters import export_pytorch_model
 from .storage.schema import StoreTelemetry, canonical_json_bytes, sha256_hex
 from .training import seed_everything
 
-BOUNDED_TRAINING_SCHEMA_VERSION = "microcolossus.bounded-training.v2"
+BOUNDED_TRAINING_SCHEMA_VERSION = "microcolossus.bounded-training.v3"
 TRAINING_METADATA_SCHEMA_VERSION = "microcolossus.training-metadata.v2"
 MULTI_STEP_RUNTIME_VERSION = "0.10.0"
+ACTIVATION_RECOMPUTE_RUNTIME_VERSION = "0.12.0"
 BATCH_STREAM_VERSION = "configured-data-source-v1"
 SCHEDULE_KIND = "constant"
 
@@ -117,17 +118,20 @@ class BundleLineageEntry:
 
 
 def _semantic_config(config: ExperimentConfig) -> dict[str, Any]:
+    training: dict[str, Any] = {
+        "micro_batch_size": config.training.micro_batch_size,
+        "sequence_length": config.training.sequence_length,
+        "learning_rate": config.training.learning_rate,
+        "weight_decay": config.training.weight_decay,
+        "gradient_clip_norm": config.training.gradient_clip_norm,
+        "seed": config.training.seed,
+        "mode": config.training.mode,
+    }
+    if config.training.activation_policy != "retain_all":
+        training["activation_policy"] = config.training.activation_policy
     return {
         "model": asdict(config.model),
-        "training": {
-            "micro_batch_size": config.training.micro_batch_size,
-            "sequence_length": config.training.sequence_length,
-            "learning_rate": config.training.learning_rate,
-            "weight_decay": config.training.weight_decay,
-            "gradient_clip_norm": config.training.gradient_clip_norm,
-            "seed": config.training.seed,
-            "mode": config.training.mode,
-        },
+        "training": training,
         "data": {
             "kind": config.data.kind,
             "validation_fraction": config.data.validation_fraction,
@@ -149,10 +153,15 @@ def _metadata_for(
     config: ExperimentConfig,
     data_source: PreparedDataSource,
 ) -> TrainingMetadata:
+    runtime_version = (
+        ACTIVATION_RECOMPUTE_RUNTIME_VERSION
+        if config.training.activation_policy == "recompute"
+        else MULTI_STEP_RUNTIME_VERSION
+    )
     return TrainingMetadata(
         schema_version=TRAINING_METADATA_SCHEMA_VERSION,
         config_digest=config_digest(config),
-        runtime_version=MULTI_STEP_RUNTIME_VERSION,
+        runtime_version=runtime_version,
         seed=config.training.seed,
         batch_stream=data_source.identity.batch_stream_version,
         schedule_kind=SCHEDULE_KIND,
