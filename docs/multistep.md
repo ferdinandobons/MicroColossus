@@ -1,6 +1,6 @@
 # Persistent Multi-Step Bounded Training
 
-This document records the MicroColossus 0.9 design for consecutive bounded optimizer steps, persistent checkpoint state, process restart, and deterministic resume.
+This document records the MicroColossus 0.9 design and accepted Apple M2 evidence for consecutive bounded optimizer steps, persistent checkpoint state, process restart, and deterministic resume.
 
 ## 1. Scope
 
@@ -28,7 +28,7 @@ bundle step 0
 
 Every new step consumes the parameter and optimizer stores referenced by the current authoritative root bundle. State is not recreated from initialization after step 0.
 
-The first implementation remains:
+The accepted implementation remains:
 
 - PyTorch reference backend;
 - FP32 full-parameter AdamW;
@@ -159,8 +159,8 @@ For each new step the runtime:
 10. executes group-local AdamW;
 11. writes version N+1 parameter and optimizer tensors into fresh candidate stores;
 12. verifies candidate stores;
-13. restores and re-exports the candidate state for exact validation;
-14. compares the candidate against an independently restored resident oracle for that step;
+13. restores and re-exports the candidate state for validation;
+14. compares the candidate against a resident oracle for that step;
 15. publishes root bundle N+1 only after validation;
 16. verifies the new root and child references.
 
@@ -211,7 +211,7 @@ Child tensor-store transaction steps are internal publication sequence numbers. 
 
 ## 10. Atomicity and later-step failure
 
-Candidate gradient, parameter, and optimizer stores can become internally valid before the root publication. They do not become the current checkpoint until the new root pointer is atomically replaced.
+Candidate gradient, parameter, and optimizer stores can become internally valid before root publication. They do not become the current checkpoint until the new root pointer is atomically replaced.
 
 For an interruption while attempting step N+1:
 
@@ -242,7 +242,7 @@ CPU validation requires exact canonical equality for:
 
 MPS validation reports raw numerical differences and keeps bitwise and numerical reproducibility separate.
 
-Each step explicitly reports that the complete candidate and resident-oracle states are materialized only after bounded execution for validation. The operational forward, backward, gradient-norm, and optimizer phases remain group-bounded.
+Each step explicitly reports that complete candidate and resident-oracle states are materialized only after bounded execution for validation. The operational forward, backward, gradient-norm, and optimizer phases remain group-bounded.
 
 The final multi-step result also explicitly reports:
 
@@ -255,11 +255,11 @@ The final multi-step result also explicitly reports:
 
 During development and validation, MicroColossus performs two reference checks.
 
-### Per-step oracle
+### 12.1 Per-step oracle
 
 The current parameter and Adam stores are restored into a resident model and optimizer. The same batch and canonical clipping coefficient are used for one update. The candidate bounded state is compared with this result.
 
-### Final replay oracle
+### 12.2 Final replay oracle
 
 After reaching the target step, a resident model is initialized from step zero and replays every deterministic batch through the target step. The final bounded checkpoint is compared with this uninterrupted resident result.
 
@@ -308,41 +308,194 @@ A multi-step result records:
 
 Application-level write counters are not interpreted as physical NAND writes.
 
-## 15. Initial validation gates
+## 15. Accepted Apple M2 validation
 
-CPU CI requires:
+Tested runtime commit:
 
-- exact 3-step micro training;
-- exact 5-step uninterrupted training;
-- exact 2-step then resumed-to-5 training;
-- uninterrupted and resumed final-state equality;
-- exact final resident replay equality;
-- correct optimizer step values;
-- contiguous bundle lineage;
-- configuration mismatch rejection;
-- later-step publication failure preserving the previous step;
-- working-set rejection preserving step 0;
-- separate Python 3.11 and 3.13 CLI resume smoke runs.
+```text
+4b1ffb20857dd948d7737484e62b007f24bf69b9
+```
 
-The target Apple Silicon gate will run:
+Package version:
 
-- micro 5-step uninterrupted;
-- micro 2-step process, exit, then resume to step 5;
-- tiny 3-step uninterrupted;
-- later-step failure injection;
-- configuration mismatch rejection;
-- root and child-store verification and recovery;
-- memory, swap, storage-growth, and cumulative-write telemetry;
-- fallback-disabled source-tree-clean validation.
+```text
+0.9.0
+```
 
-## 16. Current boundary
+Overall result: **PASS**.
 
-Version 0.9 does not yet establish:
+### 15.1 Environment and quality
+
+- MacBook Air `Mac14,2`;
+- Apple M2;
+- 8 GB unified memory;
+- native arm64 without Rosetta;
+- Python 3.13.12;
+- PyTorch 2.13.0;
+- MPS built and available;
+- fallback unset;
+- Ruff passed;
+- mypy passed over 33 source files;
+- pytest passed, 80 passed and 1 skipped;
+- compileall passed;
+- final source tree was clean.
+
+### 15.2 Successful trajectories
+
+```text
+micro uninterrupted: step 0 -> 5, GREEN
+micro phase 1:       step 0 -> 2, GREEN
+micro resumed:       step 2 -> 5, GREEN, resumed=true
+tiny uninterrupted:  step 0 -> 3, GREEN
+```
+
+Lineage:
+
+```text
+micro uninterrupted: [0, 1, 2, 3, 4, 5]
+micro resumed:       [0, 1, 2, 3, 4, 5]
+tiny:                [0, 1, 2, 3]
+```
+
+Final optimizer step values:
+
+```text
+micro: all 5.0
+tiny:  all 3.0
+```
+
+### 15.3 Process-restart equivalence
+
+Uninterrupted micro step 0 to 5 and resumed micro step 0 to 2 plus step 2 to 5 were:
+
+```text
+BITWISE_EXACT
+```
+
+The following were equal:
+
+- canonical final-state bytes;
+- parameter and optimizer tensor names and structures;
+- root lineage;
+- batch cursor sequence;
+- batch seed sequence;
+- batch checksum sequence;
+- loss trajectory;
+- gradient-norm trajectory;
+- clipping trajectory;
+- final optimizer step values.
+
+### 15.4 Numerical results
+
+- maximum per-step loss difference: `0.0`;
+- maximum per-step gradient-norm difference: `1.6985336648289717e-07`;
+- maximum final bounded-versus-resident absolute difference: `7.450580596923828e-09`;
+- mean final bounded-versus-resident absolute difference: `1.0105799101017887e-10`;
+- candidate-versus-restored exactness: true;
+- all values finite.
+
+Tiny final-state comparison:
+
+- maximum absolute difference: `2.3283064365386963e-10`;
+- mean absolute difference: `3.718845572899834e-16`.
+
+### 15.5 Working sets
+
+| Configuration | Maximum parameter group | Maximum gradient group | Maximum optimizer group |
+|---|---:|---:|---:|
+| Micro | 33,280 bytes | 33,280 bytes | 133,152 bytes |
+| Tiny | 788,480 bytes | 788,480 bytes | 3,153,952 bytes |
+
+Budgets:
+
+```text
+parameter: 1,048,576 bytes
+gradient:  1,048,576 bytes
+optimizer: 4,194,304 bytes
+```
+
+All successful steps respected the three budgets.
+
+### 15.6 Later-step failure recovery
+
+The failure harness first committed step 2, then interrupted the attempted publication of step 3.
+
+Before root manifest rename:
+
+```text
+PASS_PREVIOUS_STEP_2_PRESERVED
+```
+
+Before root `CURRENT` rename:
+
+```text
+PASS_PREVIOUS_STEP_2_PRESERVED
+```
+
+The second case left an unpublished step-3 manifest, which recovery reported without making authoritative.
+
+### 15.7 Rejection and integrity results
+
+- configuration mismatch: PASS_CONFIGURATION_MISMATCH_REJECTED;
+- corrupt referenced child: PASS_CORRUPT_CHILD_DETECTED;
+- parameter budget: PASS_PARAMETER_BUDGET_REJECTION;
+- gradient budget: PASS_GRADIENT_BUDGET_REJECTION;
+- optimizer budget: PASS_OPTIMIZER_BUDGET_REJECTION;
+- root and referenced child verification and recovery: PASS.
+
+A changed learning rate was rejected through the semantic configuration digest. A deliberately shortened referenced parameter chunk was detected before another step was published.
+
+### 15.8 Storage and publication telemetry
+
+Across successful validation roots:
+
+- total directory size: `59,901,060` bytes;
+- parameter bytes read and written: `5,782,016` and `5,782,016`;
+- gradient bytes read: `5,782,016`;
+- optimizer bytes read and written: `11,564,752` and `11,572,248`;
+- reused chunks: `167`;
+- publication `fsync` total: `0.0074204159` seconds;
+- rename and publication total: `0.0025823780` seconds.
+
+Historical bundles remain retained. No pruning or compaction behavior was validated.
+
+### 15.9 Memory and fallback
+
+- maximum RSS: `410,943,488` bytes;
+- sampled maximum MPS current allocation: `0` bytes;
+- maximum Metal driver allocation: `25,935,872` bytes;
+- swap delta: `0` bytes;
+- hidden fallback evidence: none;
+- unsupported operator evidence: none;
+- unexpected failed commands: none.
+
+The zero sampled MPS allocation is recorded as reported. MPS availability, successful MPS computation, and Metal driver activity were independently observed.
+
+## 16. Accepted conclusion
+
+M4C is complete for the tested PyTorch MPS reference path.
+
+The accepted result demonstrates that MicroColossus can:
+
+1. initialize state once;
+2. advance several bounded optimizer steps from prior committed state;
+3. stop the process after a committed checkpoint;
+4. reopen the same root in a new process;
+5. continue the deterministic trajectory;
+6. preserve Adam moments and optimizer step tensors;
+7. match uninterrupted execution bitwise in the tested micro path;
+8. preserve the previous committed step after an interrupted later publication;
+9. reject incompatible or corrupt state before continuing.
+
+## 17. Current boundary
+
+Version 0.9 does not establish:
 
 - real-corpus training;
-- persisted tokenizer or dataset-shard state;
+- persisted tokenizer or real dataset-shard state;
 - activation recomputation from storage;
 - activation offload;
+- bounded activation and operator-workspace residency;
 - asynchronous prefetch or writeback;
 - intra-layer tiling;
 - bounded MLX backward or optimizer execution;
@@ -350,4 +503,4 @@ Version 0.9 does not yet establish:
 - training state larger than unified memory;
 - 124M or 350M full-parameter training on the target Mac.
 
-The next functional milestone after target validation is a small real-text training frontend with validation loss, checkpoint, resume, and sample generation. Activation-memory management and larger-than-resident capacity demonstrations remain subsequent gates.
+The next functional milestone is a small real-text training frontend with validation loss, checkpoint resume, and sample generation. Activation-memory management and larger-than-resident capacity demonstrations remain subsequent gates.
