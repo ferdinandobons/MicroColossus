@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,9 +16,14 @@ from microcolossus.config import (
     HardwareBudget,
     ModelConfig,
     TrainingConfig,
+    load_experiment_config,
 )
 from microcolossus.pruning import apply_pruning_plan, build_pruning_plan
-from microcolossus.step_bundle import StepBundleStore
+from microcolossus.step_bundle import (
+    BundleFailurePoint,
+    BundleSimulatedCrash,
+    StepBundleStore,
+)
 from microcolossus.storage import VersionedTensorStore
 from microcolossus.storage_training import compare_states
 
@@ -134,6 +140,46 @@ def test_recompute_multi_step_matches_retain_all_exactly(tmp_path: Path) -> None
     assert recomputed.final_bounded_vs_resident_state.exact_bytes
     assert recomputed.final_bundle_vs_restored_state.exact_bytes
 
+    backward = json.loads(
+        Path(recomputed.steps[0].bounded_backward_result_path).read_text(encoding="utf-8")
+    )
+    assert backward["tied_gradient_accumulation_count"] == 2
+    assert backward["tied_gradient_version"] == 1
+    assert backward["backward_group_order"] == ["final-head", "block-0", "embedding"]
+    assert backward["backward_groups"][0]["prefix_replay"]["replayed_group_names"] == [
+        "embedding",
+        "block-0",
+    ]
+    assert backward["backward_groups"][1]["prefix_replay"]["replayed_group_names"] == [
+        "embedding"
+    ]
+    assert backward["backward_groups"][2]["prefix_replay"] is None
+
+
+def test_real_text_micro_recompute_matches_retain_all(tmp_path: Path) -> None:
+    retained_config = load_experiment_config("examples/real-text-micro.yaml")
+    recompute_config = replace(
+        retained_config,
+        name="real-text-micro-recompute-test",
+        training=replace(retained_config.training, activation_policy="recompute"),
+    )
+    retained = _run(retained_config, tmp_path / "real-retained", 2)
+    recomputed = _run(recompute_config, tmp_path / "real-recomputed", 2)
+
+    assert compare_states(
+        _current_state(tmp_path / "real-retained"),
+        _current_state(tmp_path / "real-recomputed"),
+    ).exact_bytes
+    assert [item.batch_checksum for item in retained.steps] == [
+        item.batch_checksum for item in recomputed.steps
+    ]
+    assert [item.batch_cursor for item in retained.steps] == [
+        item.batch_cursor for item in recomputed.steps
+    ]
+    assert recomputed.maximum_retained_forward_boundary_bytes == 0
+    assert recomputed.total_prefix_replayed_groups == 6
+    assert recomputed.final_bundle_vs_restored_state.exact_bytes
+
 
 def test_recompute_process_resume_matches_uninterrupted(tmp_path: Path) -> None:
     config = _config(tmp_path, activation_policy="recompute")
@@ -193,6 +239,36 @@ def test_recompute_budget_rejection_preserves_step_zero(
     bundle = StepBundleStore.open(bundle_path)
     assert bundle.current_manifest().committed_step == 0
     assert bundle.verify().committed_step == 0
+
+
+def test_recompute_later_failure_preserves_previous_bundle(tmp_path: Path) -> None:
+    config = _config(tmp_path, activation_policy="recompute")
+    bundle_path = tmp_path / "failure-bundle"
+    _run(config, bundle_path, 1)
+
+    def fail(point: BundleFailurePoint, context: dict[str, object]) -> None:
+        del context
+        if point is BundleFailurePoint.BEFORE_CURRENT_RENAME:
+            raise BundleSimulatedCrash("stop recompute publication before CURRENT")
+
+    with pytest.raises(BundleSimulatedCrash):
+        run_bounded_training(
+            config,
+            bundle_store_path=bundle_path,
+            target_step=2,
+            device_override="cpu",
+            parameter_working_set_bytes=1024**2,
+            gradient_working_set_bytes=1024**2,
+            optimizer_working_set_bytes=1024**2,
+            activation_working_set_bytes=1024**2,
+            workspace_working_set_bytes=4 * 1024**2,
+            bundle_failure_injector=fail,
+        )
+
+    bundle = StepBundleStore.open(bundle_path)
+    assert bundle.current_manifest().committed_step == 1
+    assert bundle.verify().committed_step == 1
+    assert bundle.recover().current_bundle_id == bundle.current_manifest().bundle_id
 
 
 def test_recompute_resume_after_pruning_matches_unpruned(tmp_path: Path) -> None:
