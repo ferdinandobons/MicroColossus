@@ -1,0 +1,39 @@
+name: hybrid-micro
+output_dir: runs/hybrid-micro
+
+model:
+  vocab_size: 64
+  max_sequence_length: 32
+  layers: 2
+  heads: 2
+  hidden_size: 32
+  mlp_ratio: 2
+  dropout: 0.0
+  norm_epsilon: 0.00001
+  tie_embeddings: true
+
+training:
+  mode: reference
+  activation_policy: hybrid
+  activation_anchor_policy:
+    kind: logical_budget_v1
+    fixed_interval: 2
+    activation_working_set_mib: 0.02
+    workspace_working_set_mib: 1.0
+    max_replay_groups: 2
+  steps: 3
+  micro_batch_size: 1
+  sequence_length: 8
+  learning_rate: 0.001
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  seed: 42
+  device: cpu
+
+hardware:
+  accelerator_memory_gib: 1.0
+  process_ram_gib: 1.0
+  system_memory_gib: 1.0
+  nvme_gib: 0.5
+  ssd_write_budget_tb: 1.0
+  memory_architecture: unified
