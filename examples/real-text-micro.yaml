@@ -1,0 +1,47 @@
+name: real-text-micro
+output_dir: runs/real-text-micro
+
+model:
+  vocab_size: 256
+  max_sequence_length: 64
+  layers: 1
+  heads: 4
+  hidden_size: 32
+  mlp_ratio: 2
+  dropout: 0.0
+  norm_epsilon: 0.00001
+  tie_embeddings: true
+
+training:
+  mode: reference
+  steps: 20
+  micro_batch_size: 2
+  sequence_length: 32
+  learning_rate: 0.003
+  weight_decay: 0.01
+  gradient_clip_norm: 1.0
+  seed: 42
+  device: auto
+
+data:
+  kind: utf8_text
+  train_path: data/micro-corpus.txt
+  validation_fraction: 0.15
+  tokenizer: utf8-bytes-v1
+  sampler: random-window-v1
+
+evaluation:
+  enabled: true
+  interval_steps: 1
+  validation_batches: 2
+  sample_tokens: 32
+  sample_prompt: "The workshop "
+  generation: greedy-v1
+
+hardware:
+  accelerator_memory_gib: 1.0
+  process_ram_gib: 1.0
+  system_memory_gib: 1.0
+  nvme_gib: 0.5
+  ssd_write_budget_tb: 1.0
+  memory_architecture: unified
