@@ -1,0 +1,59 @@
+name: Apply clean M6C branch
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/m6c-hybrid-clean'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/m6c-hybrid-clean
+          fetch-depth: 0
+      - name: Reconstruct and apply patch
+        id: apply
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          : > /tmp/m6c-apply.log
+          {
+            cat .m6c_payload/part* > /tmp/m6c.patch.gz.b64
+            base64 -d /tmp/m6c.patch.gz.b64 > /tmp/m6c.patch.gz
+            echo "f76b0c91790fb1e94fc23409dc824f7d74abc28464c0cf189a43da97ce1cf6b7  /tmp/m6c.patch.gz" | sha256sum -c -
+            gzip -dc /tmp/m6c.patch.gz > /tmp/m6c.patch
+            echo "ae0ae5b7d401e7ed7403cd2b243a2ebfface7f7f31fc3b663f04b61cb16870cd  /tmp/m6c.patch" | sha256sum -c -
+            git fetch origin main
+            git reset --hard origin/main
+            git apply --index /tmp/m6c.patch
+            git diff --cached --check
+            python -m compileall -q microcolossus
+          } >> /tmp/m6c-apply.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+      - name: Commit implementation or failure journal
+        if: always()
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          if [ "${{ steps.apply.outputs.status }}" = "0" ]; then
+            git commit -m "Add measured hybrid activation-anchor planning"
+          else
+            mkdir -p .github
+            cp /tmp/m6c-apply.log .github/m6c_clean_apply_failure.log
+            git add .github/m6c_clean_apply_failure.log
+            git commit -m "Record clean M6C patch application failure"
+          fi
+          git push --force origin HEAD:agent/m6c-hybrid-clean
+      - name: Fail when application failed
+        if: steps.apply.outputs.status != '0'
+        run: exit 1
