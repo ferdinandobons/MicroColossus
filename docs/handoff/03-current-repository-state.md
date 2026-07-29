@@ -98,7 +98,26 @@ The issue correctly requires:
 
 The issue remains open and should stay open until a clean implementation and target gate pass.
 
-## 5. Open pull requests that must not be merged
+## 5. M6C pull requests abandoned
+
+### PR #29
+
+```text
+title:     M6C: Add measured hybrid activation anchors
+branch:    agent/m6c-hybrid-anchors
+head:      c1d71a898eba2011b86846294fc4ec4a50a049af
+state:     closed draft
+```
+
+Its changed files are temporary patch/export transfer material:
+
+```text
+.github/m6c-patch.b64
+.github/workflows/apply-m6c-patch.yml
+.github/workflows/export-source.yml
+```
+
+It does not contain a normal reviewable implementation and must not be merged.
 
 ### PR #31
 
@@ -106,7 +125,7 @@ The issue remains open and should stay open until a clean implementation and tar
 title:     Add measured hybrid activation-anchor planning
 branch:    agent/m6c-hybrid-activation-planner
 head:      2077314ecf55a55d3d788731eaa057dd0ed354df
-state:     open draft
+state:     closed draft
 ```
 
 This branch contains an incomplete and structurally broken candidate. Its M2 diagnostic stopped at the quality gate. It should be treated as a failed experiment and reference material only.
@@ -117,7 +136,7 @@ This branch contains an incomplete and structurally broken candidate. Its M2 dia
 title:     Apply clean M6C implementation
 branch:    agent/m6c-hybrid-clean
 head:      e83f4b6445a0da81178954f02dcd5c2b2a0d7071
-state:     open draft
+state:     closed draft
 ```
 
 Its changed files are temporary transfer material:
@@ -140,10 +159,74 @@ Before implementing M6C, the successor must:
 4. remove all patch-transfer or trigger files from any product branch;
 5. confirm `main` source behavior still matches 0.12.0;
 6. run package import, Ruff, mypy, pytest, compileall, and CPU smoke;
-7. close PR `#31` and PR `#33` as abandoned after preserving useful notes;
+7. close PR `#29`, PR `#31`, and PR `#33` as abandoned after preserving useful notes;
 8. keep issue `#27` open;
 9. implement M6C through ordinary source commits, not self-modifying workflows;
 10. require a clean PR diff before requesting M2 execution.
+
+### 6.1 Stabilization branch result
+
+A normal stabilization branch was created from updated `main`:
+
+```text
+branch: agent/stabilize-repository
+base:   7c913bdc6536e72da494bb479efae0f0bb921cea
+commit: e4ffeeab9e38c461e9c9fb2fe201d2300c03ecb2
+```
+
+That commit restores `.github/workflows/ci.yml` to the accepted Python 3.11 and
+3.13 matrix from `9f9365e...`, removes
+`.github/workflows/apply-m6c-clean-once.yml`, and keeps package version
+`0.12.0`.
+
+The same commit also hardens benchmark telemetry so an unavailable
+`psutil.swap_memory()` sample does not abort CPU benchmark execution. This was
+required because fresh local pytest on macOS failed only in benchmark tests when
+`psutil.swap_memory()` raised `OSError`.
+
+Fresh local CPU verification passed:
+
+```text
+Python 3.13.12:
+  package import/version: 0.12.0
+  Ruff:                  PASS
+  mypy microcolossus:    PASS, 41 source files
+  pytest:                PASS, 119 passed and 1 skipped
+  compileall:            PASS
+  doctor:                PASS
+  CPU smoke:             PASS
+
+Python 3.11.15:
+  package import/version: 0.12.0
+  Ruff:                  PASS
+  mypy microcolossus:    PASS, 41 source files
+  pytest:                PASS, 119 passed and 1 skipped
+  compileall:            PASS
+  doctor:                PASS
+  CPU smoke:             PASS
+```
+
+The local `doctor` runs reported `mps_built: true` and `mps_available: false`.
+Therefore this stabilization result is CPU-only and does not validate Apple M2,
+MPS, APFS, physical-memory, or performance behavior.
+
+After publishing the stabilization branch, PR `#29`, PR `#31`, and PR `#33`
+were closed as abandoned M6C transfer or draft experiments. Issue `#27` remains
+open. The only open pull request is stabilization PR `#35`.
+
+After the repository was made public, the failed GitHub Actions run was rerun
+successfully:
+
+```text
+GitHub Actions run: 30445835728
+Python 3.11 job:    PASS, 14m2s
+Python 3.13 job:    PASS, 13m34s
+```
+
+This completes the restored CI matrix for stabilization PR `#35`. The skipped
+`Apply clean M6C patch once` check came from the obsolete `pull_request_target`
+workflow still present on `main` before this stabilization PR is merged; the PR
+removes that workflow from the product branch.
 
 ## 7. Safe starting points
 

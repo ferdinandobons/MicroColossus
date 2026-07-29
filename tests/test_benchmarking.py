@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import psutil
+
 from microcolossus.benchmarking import (
     BenchmarkSettings,
     array_mapping_checksum,
@@ -9,6 +11,7 @@ from microcolossus.benchmarking import (
     load_array_mapping,
     portable_parameter_count,
     run_benchmark,
+    system_memory_sample,
 )
 from microcolossus.config import (
     ExperimentConfig,
@@ -62,6 +65,17 @@ def test_batches_are_reproducible(tmp_path: Path) -> None:
     ):
         assert (first_x == second_x).all()
         assert (first_y == second_y).all()
+
+
+def test_system_memory_sample_tolerates_unavailable_swap(monkeypatch) -> None:
+    def fail_swap() -> None:
+        raise OSError("swap telemetry unavailable")
+
+    monkeypatch.setattr(psutil, "swap_memory", fail_swap)
+    available_bytes, memory_percent, swap_used_bytes = system_memory_sample()
+    assert available_bytes >= 0
+    assert memory_percent >= 0.0
+    assert swap_used_bytes == 0
 
 
 def test_pytorch_benchmark_writes_state_and_releases_initial_state(
