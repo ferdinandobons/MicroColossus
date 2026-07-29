@@ -2,21 +2,25 @@
 
 Snapshot date: **2026-07-29**.
 
-This file describes the repository before the handoff documentation is merged.
+This file describes the repository after stabilization and after the first
+target-validated M6C branch.
 
 ## 1. Repository
 
 ```text
 repository:     ferdinandobons/MicroColossus
 default branch: main
-visibility:     private
+visibility:     public
 ```
 
 The authenticated owner has administrative and push access.
 
+The repository was made public on 2026-07-29 to unblock GitHub Actions while
+the billing/spending-limit queue was preventing CI from starting.
+
 ## 2. Accepted source baseline
 
-The latest accepted product version is:
+The latest accepted product version before the clean M6C PR was:
 
 ```text
 MicroColossus 0.12.0
@@ -35,6 +39,9 @@ The accepted documentation and repository baseline before the M6C publication ex
 ```
 
 At handoff time, `pyproject.toml` on `main` still reports `0.12.0`, and the planner console script for 0.13.0 is not present.
+
+The current target-validated M6C branch reports `0.13.0`; see section 6.3 for
+the exact commit and validation boundary.
 
 ## 3. Pre-handoff `main` condition
 
@@ -212,7 +219,8 @@ MPS, APFS, physical-memory, or performance behavior.
 
 After publishing the stabilization branch, PR `#29`, PR `#31`, and PR `#33`
 were closed as abandoned M6C transfer or draft experiments. Issue `#27` remains
-open. The only open pull request is stabilization PR `#35`.
+open. At that point, stabilization PR `#35` was the remaining PR; it was later
+merged as described below.
 
 After the repository was made public, the failed GitHub Actions run was rerun
 successfully:
@@ -225,28 +233,76 @@ Python 3.13 job:    PASS, 13m34s
 
 This completes the restored CI matrix for stabilization PR `#35`. The skipped
 `Apply clean M6C patch once` check came from the obsolete `pull_request_target`
-workflow still present on `main` before this stabilization PR is merged; the PR
-removes that workflow from the product branch.
+workflow that was still present on `main` before the stabilization PR was
+merged; that PR removed the workflow from the product branch.
+
+### 6.2 Stabilization accepted on `main`
+
+Stabilization PR `#35` was marked ready and merged into `main` after CI passed.
+
+```text
+merge commit:          67b4eb25c3f74cdd142fb5802db57bcb57b72f19
+merged pull request:   #35
+package version:       0.12.0
+workflow files:        .github/workflows/ci.yml
+open pull requests:    none
+open M6C issue:        #27
+```
+
+The post-merge `main` CI run passed:
+
+```text
+GitHub Actions run: 30450230394
+Python 3.11 job:    PASS
+Python 3.13 job:    PASS
+```
+
+Local final checks after fast-forwarding `main`:
+
+```text
+git status --short --branch: ## main...origin/main
+git diff --check:            PASS
+```
+
+This completes repository stabilization as **Implemented and accepted in CPU CI
+only**. It does not validate Apple M2, MPS, APFS, physical-memory behavior,
+hybrid activation anchors, or larger-than-memory execution.
+
+### 6.3 M6C branch validated on Apple M2
+
+PR `#36` implements M6C through normal source commits on branch
+`agent/m6c-profile-planner`.
+
+```text
+target-tested commit: 8e9b0f8e58fdaa288ba551d994d9b8b81adbea12
+package version:      0.13.0
+machine:              MacBook Air Mac14,2, Apple M2, 8 GB
+quality gate:         PASS
+GitHub Actions:       Python 3.11 PASS, Python 3.13 PASS
+MPS matrix:           micro, tiny, small PASS
+durability:           resume, identity rejection, pruning, publication failure PASS
+```
+
+The M6C result is accepted target evidence for measured hybrid nearest-anchor
+execution on the tested workloads. It still does not validate larger-than-memory
+training, activation offload, asynchronous I/O, direct NVMe behavior, bounded
+MLX optimization, or intra-layer tiling.
 
 ## 7. Safe starting points
 
-Two valid approaches exist.
+The current safe starting point for post-M6C work is PR `#36` on branch
+`agent/m6c-profile-planner`, after normal CI is green.
 
-### Approach A. Restore the accepted baseline
-
-Create a new branch from:
+Historical fallback, if PR `#36` is abandoned for reasons unrelated to the
+runtime implementation:
 
 ```text
 9f9365e597693e2cffa4f454180203e7219a7cde
 ```
 
-Then implement M6C cleanly and open a new PR to a restored `main`.
-
-### Approach B. Clean current `main`
-
-Revert or replace only the temporary workflow changes until the tree is equivalent to `9f9365e...` for CI and runtime source, then branch normally.
-
-Approach A is easier to reason about. Approach B preserves later documentation commits if any are intentionally retained.
+That fallback returns to the accepted pre-M6C documentation baseline and should
+only be used after preserving the evidence that PR `#36` produced a passing
+target run.
 
 ## 8. What not to do
 

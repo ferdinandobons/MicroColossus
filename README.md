@@ -12,7 +12,41 @@ The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 
 MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed global clipping, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, safe checkpoint pruning, and persistent activation recomputation on the target M2.
 
-Version **0.12.0** adds persistent multi-step activation recomputation. Native Apple M2 validation passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`.
+Version **0.13.0** adds the measured hybrid activation-anchor runtime on top
+of the accepted 0.12.0 recomputation baseline. Native Apple M2 validation for
+0.12.0 passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`. Native
+Apple M2 validation for 0.13.0 M6C passed on PR `#36` at commit
+`8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`.
+
+## Current status
+
+As of 2026-07-29, the current development head is PR `#36`
+(`agent/m6c-profile-planner`) at commit
+`e3de605119dc8bf481a03ddc38283879fcc350ee`.
+
+Current state:
+
+- PR `#36` is open and still marked draft, with a clean merge state.
+- GitHub Actions run `30465100374` passed on Python 3.11 and 3.13, including
+  lint, type check, pytest, compile, and CPU smoke.
+- Local gates also passed on the Apple M2 development machine: Ruff, mypy,
+  pytest, compileall, and `microcolossus doctor`.
+- The M6C Apple M2 target validation passed on the runtime commit
+  `8e9b0f8e58fdaa288ba551d994d9b8b81adbea12` before this documentation commit.
+- The validated M6C scope covers micro, tiny, and small MPS policy comparisons,
+  deterministic profiles and plans, checksum/provenance equivalence, numerical
+  state comparison, process resume, plan identity rejection, pruning followed
+  by resume, and simulated publication-failure recovery.
+
+Still incomplete:
+
+- PR `#36` has not been merged into `main`.
+- No final MicroColossus 0.13.0 tag or GitHub Release exists.
+- The project still does not claim larger-than-memory training, activation
+  tensor offload, asynchronous I/O, direct NVMe behavior, intra-layer tiling,
+  or bounded MLX backward and optimizer execution.
+- The next engineering phase is to remove or reduce validation-only full-state
+  materialization and then produce the first larger-than-memory proof.
 
 ## Why Apple Silicon changes the design
 
@@ -74,11 +108,12 @@ The committed root step is the authoritative next-batch cursor. Configuration pr
 
 ### Activation policies
 
-MicroColossus 0.12 supports:
+MicroColossus supports:
 
 ```text
 training.activation_policy: retain_all
 training.activation_policy: recompute
+training.activation_policy: hybrid
 ```
 
 `retain_all` keeps each non-final forward boundary on CPU until the matching reverse group executes.
@@ -96,7 +131,23 @@ embedding backward
     use token IDs directly
 ```
 
-The first recomputation schedule is synchronous and favors correctness and observability over throughput. Prefix replay can be quadratic in group count. A future hybrid policy will retain selected anchors from measured replay and memory curves.
+The first recomputation schedule is synchronous and favors correctness and
+observability over throughput. Prefix replay can be quadratic in group count.
+
+`hybrid` uses the M6C measured-budget planner to retain selected forward
+anchors, then reconstructs each backward input from its nearest retained
+preceding anchor:
+
+```bash
+microcolossus-activation-plan \
+  --config examples/real-text-micro-hybrid.yaml \
+  --profile-output runs/hybrid-profile.json \
+  --plan-output runs/hybrid-plan.json
+```
+
+This produces checksummed profile and plan JSON for `hybrid` activation
+policy. During persistent training, the root also stores hybrid profile and
+plan identity so resume rejects changed anchors, budgets, or plan checksums.
 
 Separate logical budgets cover:
 
@@ -117,7 +168,10 @@ retain_all: 444,071,936 bytes
 recompute:  533,528,576 bytes
 ```
 
-This is a deliberate result, not a hidden failure. The logical zero-boundary contract passed, while the current synchronous schedule did not reduce measured physical RSS for that workload. The next milestone therefore uses a measured hybrid anchor planner rather than assuming that maximal recomputation is optimal.
+This is a deliberate result, not a hidden failure. The logical zero-boundary
+contract passed, while the synchronous schedule did not reduce measured
+physical RSS for that workload. M6C therefore uses a measured hybrid anchor
+planner rather than assuming that maximal recomputation is optimal.
 
 ### Deterministic real-text frontend
 
@@ -177,6 +231,7 @@ The corrected Apple M2/APFS validation demonstrated:
 | Deterministic real-text micro and 1.85M training | PASS |
 | Safe pruning and post-pruning resume | PASS |
 | Persistent activation recomputation | PASS |
+| Measured hybrid activation-anchor execution | PASS |
 
 The controlled resident 23,213,056-parameter benchmark produced:
 
@@ -280,7 +335,6 @@ microcolossus-prune apply \
 
 Not yet established:
 
-- hybrid activation anchors;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict total physical-memory-pressure enforcement;

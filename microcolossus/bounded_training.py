@@ -8,6 +8,18 @@ from pathlib import Path
 
 import torch
 
+from .activation_planner import (
+    ActivationMeasurementProfile,
+    ActivationPlan,
+    ActivationPlanIntegrityError,
+    ActivationProfileIntegrityError,
+    build_activation_measurement_profile,
+    build_activation_plan,
+    load_activation_plan,
+    load_activation_profile,
+    write_activation_plan,
+    write_activation_profile,
+)
 from .bounded_optimizer import _optimizer_records, _store_payloads
 from .bounded_training_types import BoundedTrainingResult, PersistentStepResult
 from .config import ExperimentConfig
@@ -34,6 +46,9 @@ from .training_checkpoint import (
     _prepare_data_source_for_run,
     _validate_resume_metadata,
 )
+
+HYBRID_PROFILE_FILENAME = "HYBRID_ACTIVATION_PROFILE.json"
+HYBRID_PLAN_FILENAME = "HYBRID_ACTIVATION_PLAN.json"
 
 __all__ = [
     "BATCH_STREAM_VERSION",
@@ -168,6 +183,83 @@ def _ensure_current_progress(
     )
 
 
+def _build_hybrid_activation_artifacts(
+    config: ExperimentConfig,
+    *,
+    device: torch.device,
+    activation_working_set_bytes: int,
+    workspace_working_set_bytes: int,
+) -> tuple[ActivationMeasurementProfile | None, ActivationPlan | None]:
+    if config.training.activation_policy != "hybrid":
+        return None, None
+    profile = build_activation_measurement_profile(
+        config,
+        backend="pytorch",
+        device_identity=str(device),
+        dtype="float32",
+    )
+    plan = build_activation_plan(
+        profile,
+        activation_budget_bytes=activation_working_set_bytes,
+        workspace_budget_bytes=workspace_working_set_bytes,
+        max_replay_depth=config.training.activation_anchor_policy.max_replay_depth,
+        fixed_interval=config.training.activation_anchor_policy.fixed_interval,
+    )
+    if not plan.feasible:
+        raise ActivationPlanIntegrityError(
+            f"hybrid activation plan is infeasible: {plan.rejection_reason}"
+        )
+    return profile, plan
+
+
+def _write_hybrid_activation_artifacts(
+    destination: Path,
+    profile: ActivationMeasurementProfile | None,
+    plan: ActivationPlan | None,
+) -> None:
+    if profile is None or plan is None:
+        return
+    write_activation_profile(destination / HYBRID_PROFILE_FILENAME, profile)
+    write_activation_plan(destination / HYBRID_PLAN_FILENAME, plan)
+
+
+def _validate_hybrid_activation_artifacts(
+    destination: Path,
+    profile: ActivationMeasurementProfile | None,
+    plan: ActivationPlan | None,
+) -> None:
+    if profile is None or plan is None:
+        return
+    profile_path = destination / HYBRID_PROFILE_FILENAME
+    plan_path = destination / HYBRID_PLAN_FILENAME
+    if not profile_path.exists() or not plan_path.exists():
+        raise ResumeConfigurationError("hybrid activation profile or plan is missing")
+    try:
+        stored_profile = load_activation_profile(profile_path)
+        stored_plan = load_activation_plan(plan_path)
+        stored_plan.validate(stored_profile)
+    except (ActivationPlanIntegrityError, ActivationProfileIntegrityError) as exc:
+        raise ResumeConfigurationError("hybrid activation plan is invalid") from exc
+    mismatches: list[str] = []
+    if stored_profile.profile_checksum != profile.profile_checksum:
+        mismatches.append("activation_profile_checksum")
+    if stored_plan.plan_checksum != plan.plan_checksum:
+        mismatches.append("activation_plan_checksum")
+    if stored_plan.activation_budget_bytes != plan.activation_budget_bytes:
+        mismatches.append("activation_budget_bytes")
+    if stored_plan.workspace_budget_bytes != plan.workspace_budget_bytes:
+        mismatches.append("workspace_budget_bytes")
+    if stored_plan.max_replay_depth != plan.max_replay_depth:
+        mismatches.append("max_replay_depth")
+    if stored_plan.selected_anchor_group_names != plan.selected_anchor_group_names:
+        mismatches.append("activation_anchor_group_names")
+    if mismatches:
+        raise ResumeConfigurationError(
+            "hybrid activation plan does not match the requested configuration: "
+            + ", ".join(mismatches)
+        )
+
+
 def run_bounded_training(
     config: ExperimentConfig,
     *,
@@ -198,18 +290,43 @@ def run_bounded_training(
     data_source = _prepare_data_source_for_run(config)
     destination = Path(bundle_store_path)
     initialization_publication: BundlePublicationTelemetry | None = None
+    device = resolve_device(device_override or config.training.device)
+    activation_profile, activation_plan = _build_hybrid_activation_artifacts(
+        config,
+        device=device,
+        activation_working_set_bytes=activation_working_set_bytes,
+        workspace_working_set_bytes=workspace_working_set_bytes,
+    )
     if destination.exists():
         assert_pruning_inactive(destination)
         bundle_store = StepBundleStore.open(destination)
         metadata = _load_training_metadata(destination)
-        _validate_resume_metadata(config, metadata, data_source)
+        _validate_resume_metadata(
+            config,
+            metadata,
+            data_source,
+            activation_profile=activation_profile,
+            activation_plan=activation_plan,
+        )
+        _validate_hybrid_activation_artifacts(
+            destination,
+            activation_profile,
+            activation_plan,
+        )
         current = bundle_store.current_manifest()
         resumed = True
         initialized_bundle_id = _lineage(bundle_store)[0].bundle_id
     else:
         bundle_store, current, initialization_publication, metadata = (
-            _initialize_training_root(config, destination, data_source)
+            _initialize_training_root(
+                config,
+                destination,
+                data_source,
+                activation_profile=activation_profile,
+                activation_plan=activation_plan,
+            )
         )
+        _write_hybrid_activation_artifacts(destination, activation_profile, activation_plan)
         resumed = False
         initialized_bundle_id = current.bundle_id
     bundle_store.verify(current.bundle_id)
@@ -219,7 +336,6 @@ def run_bounded_training(
             f"target_step {target_step} is behind current committed step {started_step}"
         )
 
-    device = resolve_device(device_override or config.training.device)
     seed_everything(config.training.seed)
     _ensure_current_progress(
         config,
@@ -240,6 +356,8 @@ def run_bounded_training(
             optimizer_working_set_bytes=optimizer_working_set_bytes,
             activation_working_set_bytes=activation_working_set_bytes,
             workspace_working_set_bytes=workspace_working_set_bytes,
+            activation_profile=activation_profile,
+            activation_plan=activation_plan,
             bundle_failure_injector=bundle_failure_injector,
         )
         step_results.append(step)

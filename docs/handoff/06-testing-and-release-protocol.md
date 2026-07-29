@@ -48,7 +48,7 @@ Required rules:
 - no unrelated changes in one PR;
 - no merge while the PR is draft;
 - no merge while required checks are failing or missing;
-- use the exact PR head SHA in all target prompts;
+- use the exact PR head SHA in all target validation runs;
 - after target PASS, update documentation in a separate small PR when practical.
 
 ## 3. Mandatory local and CI gate

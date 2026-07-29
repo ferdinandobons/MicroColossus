@@ -12,7 +12,10 @@ Repository:
 https://github.com/ferdinandobons/MicroColossus
 ```
 
-The project owner has an 8 GB Apple M2 MacBook Air. You implement, test, document, and publish the source. A separate AI on the owner's Mac executes target-specific prompts that you provide. The Mac AI must not implement product features or modify tracked source.
+The project owner has an 8 GB Apple M2 MacBook Air. You implement, test,
+document, publish the source, and run target-specific verification directly
+when the current environment is that Mac. If a future environment cannot access
+the target hardware, keep the target run read-only and exact-commit scoped.
 
 ## A. Mandatory first reading
 
@@ -493,7 +496,8 @@ Also validate:
 
 A physical RSS win is preferred but not mandatory. Report raw values and classify the logical Pareto result.
 
-When the owner returns artifacts, analyze them, fix product code if necessary, update documentation, and repeat until M6C is accepted.
+After target verification, analyze the artifacts, fix product code if
+necessary, update documentation, and repeat until the milestone is accepted.
 
 ## J. Work after M6C
 

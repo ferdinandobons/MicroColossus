@@ -22,7 +22,7 @@ def _prefix_replay_traffic(
     result_path: str,
     activation_policy: str,
 ) -> tuple[int, int, int]:
-    if activation_policy != "recompute":
+    if activation_policy not in {"recompute", "hybrid"}:
         return 0, 0, 0
     value = json.loads(Path(result_path).read_text(encoding="utf-8"))
     return (

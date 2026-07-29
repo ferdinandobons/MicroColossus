@@ -489,17 +489,73 @@ It does not establish activation storage or offload, asynchronous overlap, direc
 | M5. Deterministic small real-corpus frontend | Completed and validated on M2 |
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
 | M6B. Persistent activation recomputation and strict budgets | Completed and validated on M2 |
-| M6C. Measured hybrid activation-anchor planner | Open in issue #27 |
+| M6C. Measured hybrid activation-anchor planner | Completed and validated on M2 |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
 | Bounded MLX backward and optimizer execution | Not started |
 | 124M and 350M capacity demonstrations | Not started |
 
+### 13.1 M6C Apple M2 validation
+
+The native Apple M2 validation tested commit:
+
+```text
+8e9b0f8e58fdaa288ba551d994d9b8b81adbea12
+```
+
+Package version: `0.13.0`.
+
+Overall result: **PASS** for the current PR diagnostic gate.
+
+The quality gate passed Ruff, mypy, pytest, compileall, doctor, CLI preflight,
+and GitHub Actions on Python 3.11 and 3.13. The target run used native arm64
+PyTorch MPS on a MacBook Air Mac14,2, Apple M2, 8 GB unified memory, with
+`PYTORCH_ENABLE_MPS_FALLBACK` unset.
+
+The M6C planner produced deterministic profile and plan JSON for identical
+inputs. The selected hybrid anchors were:
+
+| Workload | Selected anchors |
+|---|---|
+| Real-text micro | `embedding` |
+| Tiny | `block-0` |
+| Real-text small | `block-0`, `block-2` |
+
+The policy comparison produced a real logical Pareto intermediate point:
+
+| Workload | Retain bytes | Hybrid bytes | Recompute bytes | Hybrid replay groups | Recompute replay groups | Hybrid rereads | Recompute rereads |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Real-text micro | `16,384` | `8,192` | `0` | `5` | `15` | `166,400` | `576,000` |
+| Tiny | `98,304` | `32,768` | `0` | `6` | `18` | `2,955,264` | `8,865,792` |
+| Real-text small | `491,520` | `196,608` | `0` | `3` | `15` | `3,840,000` | `19,200,000` |
+
+All retain_all versus recompute, retain_all versus hybrid, and recompute versus
+hybrid state comparisons were classified `GREEN`. The largest observed maximum
+absolute state difference was `5.960464477539063e-08` on the micro workload.
+Batch provenance, data identity, cursor sequences, and validation batch
+checksums matched across policies. Candidate restore and final bundle restore
+were exact.
+
+Durability checks also passed:
+
+- process restart and hybrid resume from step 2 to step 5;
+- changed activation budget, workspace budget, tampered plan, and tampered
+  profile all rejected resume while preserving step 1 authority;
+- pruning to keep only current step 3 followed by hybrid resume to step 5;
+- both simulated root publication failure points preserved previous authority
+  and retried to the expected state.
+
+Physical telemetry was recorded as sampled RSS, MPS current allocation, and
+Metal-driver allocation. The small workload sampled peak RSS was
+`519,716,864` bytes for retain_all, `437,813,248` bytes for recompute, and
+`500,006,912` bytes for hybrid. The small workload sampled peak Metal-driver
+allocation was `59,441,152` bytes for all three policies. These counters are
+not additive physical-memory pools.
+
 ## 14. Current evidence boundary
 
 The accepted evidence does not establish:
 
-- hybrid activation anchors;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict total physical-memory-pressure enforcement;
@@ -518,7 +574,16 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 
 ## 15. Next engineering gate
 
-The next implementation gate is M6C, a measured hybrid activation-anchor planner.
+The next target gate is M6C Apple M2 validation for the measured hybrid
+activation-anchor runtime.
+
+The 0.13.0 implementation adds deterministic activation measurement profiles,
+canonical profile and plan checksums, retain-all, recompute, fixed-interval,
+and measured-budget schedule summaries, public APIs,
+`microcolossus-activation-plan`, hybrid examples, persistent nearest-anchor
+backward execution, plan identity in root metadata, resume rejection for changed
+hybrid plans or budgets, pruning compatibility, and publication-failure
+coverage.
 
 The planner must use the accepted M2 observations rather than an arbitrary checkpoint interval. It should search for a Pareto improvement across:
 

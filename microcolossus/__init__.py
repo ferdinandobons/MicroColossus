@@ -6,6 +6,23 @@ from .activation_recompute import (
     WorkspaceWorkingSetExceededError,
     run_activation_recompute_validation,
 )
+from .activation_planner import (
+    ACTIVATION_PLAN_SCHEMA_VERSION,
+    ACTIVATION_PLANNER_VERSION,
+    ACTIVATION_PROFILE_SCHEMA_VERSION,
+    ActivationMeasurementProfile,
+    ActivationPlan,
+    ActivationPlanIntegrityError,
+    ActivationProfileIntegrityError,
+    ActivationReplaySegment,
+    ActivationScheduleSummary,
+    build_activation_measurement_profile,
+    build_activation_plan,
+    load_activation_plan,
+    load_activation_profile,
+    write_activation_plan,
+    write_activation_profile,
+)
 from .bounded_backward import (
     BoundedBackwardResult,
     GradientWorkingSetExceededError,
@@ -58,6 +75,15 @@ from .storage_training import StorageBackedStepResult, run_observable_storage_st
 
 __all__ = [
     "ActivationRecomputeResult",
+    "ActivationMeasurementProfile",
+    "ActivationPlan",
+    "ActivationPlanIntegrityError",
+    "ActivationProfileIntegrityError",
+    "ActivationReplaySegment",
+    "ActivationScheduleSummary",
+    "ACTIVATION_PLAN_SCHEMA_VERSION",
+    "ACTIVATION_PLANNER_VERSION",
+    "ACTIVATION_PROFILE_SCHEMA_VERSION",
     "ActivationWorkingSetExceededError",
     "BoundedBackwardResult",
     "BoundedForwardResult",
@@ -93,7 +119,11 @@ __all__ = [
     "WorkspaceWorkingSetExceededError",
     "apply_pruning_plan",
     "build_pruning_plan",
+    "build_activation_measurement_profile",
+    "build_activation_plan",
     "build_static_plan",
+    "load_activation_plan",
+    "load_activation_profile",
     "load_pruning_plan",
     "prepare_data_source",
     "run_activation_recompute_validation",
@@ -104,6 +134,8 @@ __all__ = [
     "run_observable_storage_step",
     "write_pruning_plan",
     "write_pruning_report",
+    "write_activation_plan",
+    "write_activation_profile",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"

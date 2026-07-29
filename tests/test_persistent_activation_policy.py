@@ -10,6 +10,7 @@ from microcolossus.activation_recompute import (
     ActivationWorkingSetExceededError,
     WorkspaceWorkingSetExceededError,
 )
+from microcolossus.activation_planner import ActivationPlanIntegrityError
 from microcolossus.bounded_training import ResumeConfigurationError, run_bounded_training
 from microcolossus.config import (
     ExperimentConfig,
@@ -179,6 +180,214 @@ def test_real_text_micro_recompute_matches_retain_all(tmp_path: Path) -> None:
     assert recomputed.maximum_retained_forward_boundary_bytes == 0
     assert recomputed.total_prefix_replayed_groups == 6
     assert recomputed.final_bundle_vs_restored_state.exact_bytes
+
+
+def test_hybrid_multi_step_is_intermediate_and_matches_extremes(
+    tmp_path: Path,
+) -> None:
+    retained = _run(
+        _config(tmp_path, activation_policy="retain_all"),
+        tmp_path / "hybrid-retained",
+        3,
+    )
+    recomputed = _run(
+        _config(tmp_path, activation_policy="recompute"),
+        tmp_path / "hybrid-recomputed",
+        3,
+    )
+    hybrid = _run(
+        _config(tmp_path, activation_policy="hybrid"),
+        tmp_path / "hybrid",
+        3,
+        activation_bytes=512,
+    )
+
+    assert hybrid.activation_policy == "hybrid"
+    assert all(item.activation_policy == "hybrid" for item in hybrid.steps)
+    assert compare_states(
+        _current_state(tmp_path / "hybrid-retained"),
+        _current_state(tmp_path / "hybrid"),
+    ).exact_bytes
+    assert compare_states(
+        _current_state(tmp_path / "hybrid-recomputed"),
+        _current_state(tmp_path / "hybrid"),
+    ).exact_bytes
+    assert 0 < hybrid.maximum_retained_forward_boundary_bytes < (
+        retained.maximum_retained_forward_boundary_bytes
+    )
+    assert 0 < hybrid.total_prefix_replayed_groups < (
+        recomputed.total_prefix_replayed_groups
+    )
+    assert hybrid.total_prefix_parameter_logical_bytes_read < (
+        recomputed.total_prefix_parameter_logical_bytes_read
+    )
+    assert hybrid.final_bounded_vs_resident_state.exact_bytes
+    assert hybrid.final_bundle_vs_restored_state.exact_bytes
+    assert all(item.resident_vs_candidate_state.exact_bytes for item in hybrid.steps)
+    assert all(item.candidate_vs_restored_state.exact_bytes for item in hybrid.steps)
+
+    metadata = hybrid.training_metadata
+    assert metadata.activation_plan_checksum is not None
+    assert metadata.activation_profile_checksum is not None
+    assert metadata.activation_budget_bytes == 512
+    assert metadata.workspace_budget_bytes == 4 * 1024**2
+    assert metadata.activation_anchor_group_names
+
+    backward = json.loads(
+        Path(hybrid.steps[0].bounded_backward_result_path).read_text(encoding="utf-8")
+    )
+    assert backward["activation_policy"] == "hybrid"
+    assert backward["selected_anchor_group_names"] == list(
+        metadata.activation_anchor_group_names
+    )
+    assert backward["tied_gradient_accumulation_count"] == 2
+    assert backward["backward_group_order"] == ["final-head", "block-0", "embedding"]
+    assert backward["backward_groups"][0]["prefix_replay"]["replayed_group_names"] == []
+    assert backward["backward_groups"][1]["prefix_replay"]["replayed_group_names"] == [
+        "embedding"
+    ]
+    assert backward["backward_groups"][2]["prefix_replay"] is None
+
+
+def test_hybrid_resume_rejects_changed_budget_or_plan(tmp_path: Path) -> None:
+    config = _config(tmp_path, activation_policy="hybrid")
+    _run(config, tmp_path / "hybrid-plan-root", 1, activation_bytes=512)
+
+    with pytest.raises(ResumeConfigurationError, match="activation_plan_checksum"):
+        _run(config, tmp_path / "hybrid-plan-root", 2, activation_bytes=768)
+    assert (
+        StepBundleStore.open(tmp_path / "hybrid-plan-root")
+        .current_manifest()
+        .committed_step
+        == 1
+    )
+
+
+def test_hybrid_resume_rejects_tampered_plan_artifact(tmp_path: Path) -> None:
+    config = _config(tmp_path, activation_policy="hybrid")
+    bundle_path = tmp_path / "hybrid-tampered-plan"
+    _run(config, bundle_path, 1, activation_bytes=512)
+    plan_path = bundle_path / "HYBRID_ACTIVATION_PLAN.json"
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["total_replayed_groups"] += 1
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ResumeConfigurationError, match="hybrid activation"):
+        _run(config, bundle_path, 2, activation_bytes=512)
+    assert StepBundleStore.open(bundle_path).current_manifest().committed_step == 1
+
+
+def test_hybrid_infeasible_plan_creates_no_root(tmp_path: Path) -> None:
+    destination = tmp_path / "hybrid-infeasible"
+
+    with pytest.raises(ActivationPlanIntegrityError):
+        _run(
+            _config(tmp_path, activation_policy="hybrid"),
+            destination,
+            1,
+            activation_bytes=1,
+        )
+
+    assert not destination.exists()
+
+
+def test_hybrid_process_resume_matches_uninterrupted(tmp_path: Path) -> None:
+    config = _config(tmp_path, activation_policy="hybrid")
+    first = _run(config, tmp_path / "hybrid-resumed", 1, activation_bytes=512)
+    resumed = _run(config, tmp_path / "hybrid-resumed", 3, activation_bytes=512)
+    uninterrupted = _run(
+        config,
+        tmp_path / "hybrid-uninterrupted",
+        3,
+        activation_bytes=512,
+    )
+
+    assert first.final_step == 1
+    assert resumed.resumed
+    assert resumed.started_step == 1
+    assert resumed.final_step == 3
+    assert compare_states(
+        _current_state(tmp_path / "hybrid-resumed"),
+        _current_state(tmp_path / "hybrid-uninterrupted"),
+    ).exact_bytes
+    assert resumed.final_bounded_vs_resident_state.exact_bytes
+    assert uninterrupted.final_bounded_vs_resident_state.exact_bytes
+    assert [item.committed_step for item in resumed.lineage] == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        BundleFailurePoint.BEFORE_MANIFEST_RENAME,
+        BundleFailurePoint.BEFORE_CURRENT_RENAME,
+    ],
+)
+def test_hybrid_later_failure_preserves_previous_bundle(
+    tmp_path: Path,
+    failure_point: BundleFailurePoint,
+) -> None:
+    config = _config(tmp_path, activation_policy="hybrid")
+    bundle_path = tmp_path / f"hybrid-failure-{failure_point.value}"
+    _run(config, bundle_path, 1, activation_bytes=512)
+
+    def fail(point: BundleFailurePoint, context: dict[str, object]) -> None:
+        del context
+        if point is failure_point:
+            raise BundleSimulatedCrash("stop hybrid publication")
+
+    with pytest.raises(BundleSimulatedCrash):
+        run_bounded_training(
+            config,
+            bundle_store_path=bundle_path,
+            target_step=2,
+            device_override="cpu",
+            parameter_working_set_bytes=1024**2,
+            gradient_working_set_bytes=1024**2,
+            optimizer_working_set_bytes=1024**2,
+            activation_working_set_bytes=512,
+            workspace_working_set_bytes=4 * 1024**2,
+            bundle_failure_injector=fail,
+        )
+
+    bundle = StepBundleStore.open(bundle_path)
+    assert bundle.current_manifest().committed_step == 1
+    assert bundle.verify().committed_step == 1
+    assert bundle.recover().current_bundle_id == bundle.current_manifest().bundle_id
+
+
+def test_hybrid_resume_after_pruning_matches_unpruned(tmp_path: Path) -> None:
+    config = _config(tmp_path, activation_policy="hybrid")
+    pruned_path = tmp_path / "hybrid-pruned"
+    _run(config, pruned_path, 3, activation_bytes=512)
+    plan = build_pruning_plan(
+        config,
+        bundle_store_path=pruned_path,
+        keep_previous=0,
+        milestone_interval=0,
+    )
+    report = apply_pruning_plan(
+        config,
+        bundle_store_path=pruned_path,
+        plan=plan,
+    )
+    assert report.retained_steps == (3,)
+    assert report.current_pointer_unchanged
+
+    resumed = _run(config, pruned_path, 4, activation_bytes=512)
+    uninterrupted = _run(
+        config,
+        tmp_path / "hybrid-unpruned",
+        4,
+        activation_bytes=512,
+    )
+    assert resumed.resumed
+    assert resumed.started_step == 3
+    assert compare_states(
+        _current_state(pruned_path),
+        _current_state(tmp_path / "hybrid-unpruned"),
+    ).exact_bytes
+    assert resumed.final_bundle_vs_restored_state.exact_bytes
+    assert uninterrupted.final_bundle_vs_restored_state.exact_bytes
 
 
 def test_recompute_process_resume_matches_uninterrupted(tmp_path: Path) -> None:

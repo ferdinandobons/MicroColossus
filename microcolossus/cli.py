@@ -31,6 +31,23 @@ def _parser() -> argparse.ArgumentParser:
     plan = subcommands.add_parser("plan", help="estimate memory requirements")
     plan.add_argument("--config", required=True, help="path to an experiment YAML file")
 
+    activation_plan = subcommands.add_parser(
+        "activation-plan",
+        help="build a checksummed measured activation-anchor profile and plan",
+    )
+    activation_plan.add_argument(
+        "--config", required=True, help="path to an experiment YAML file"
+    )
+    activation_plan.add_argument("--profile-output", required=True)
+    activation_plan.add_argument("--plan-output", required=True)
+    activation_plan.add_argument("--backend", default="pytorch")
+    activation_plan.add_argument("--device-identity", default="cpu")
+    activation_plan.add_argument("--dtype", default="float32")
+    activation_plan.add_argument("--activation-working-set-mib", type=float, default=1.0)
+    activation_plan.add_argument("--workspace-working-set-mib", type=float, default=4.0)
+    activation_plan.add_argument("--fixed-interval", type=int, default=2)
+    activation_plan.add_argument("--max-replay-depth", type=int, default=None)
+
     train = subcommands.add_parser("train", help="run the resident reference baseline")
     train.add_argument("--config", required=True, help="path to an experiment YAML file")
     train.add_argument("--steps", type=int, default=None, help="override configured steps")
@@ -261,6 +278,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed_everything(config.training.seed)
         model = DecoderOnlyTransformer(config.model)
         print(json.dumps(build_static_plan(model, config).to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "activation-plan":
+        from .activation_planner import (
+            build_activation_measurement_profile,
+            build_activation_plan,
+            write_activation_plan,
+            write_activation_profile,
+        )
+
+        mib = 1024**2
+        profile = build_activation_measurement_profile(
+            config,
+            backend=args.backend,
+            device_identity=args.device_identity,
+            dtype=args.dtype,
+        )
+        plan = build_activation_plan(
+            profile,
+            activation_budget_bytes=int(args.activation_working_set_mib * mib),
+            workspace_budget_bytes=int(args.workspace_working_set_mib * mib),
+            max_replay_depth=args.max_replay_depth,
+            fixed_interval=args.fixed_interval,
+        )
+        write_activation_profile(args.profile_output, profile)
+        write_activation_plan(args.plan_output, plan)
+        print(json.dumps(plan.to_dict(), indent=2, sort_keys=True))
         return 0
 
     if args.command == "train":

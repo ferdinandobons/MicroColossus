@@ -25,7 +25,7 @@ from microcolossus.training_checkpoint import ACTIVATION_RECOMPUTE_RUNTIME_VERSI
 
 
 def test_real_text_training_release_version_and_public_api() -> None:
-    assert microcolossus.__version__ == "0.12.0"
+    assert microcolossus.__version__ == "0.13.0"
     assert callable(microcolossus.run_bounded_training)
     assert callable(microcolossus.run_activation_recompute_validation)
     assert callable(microcolossus.prepare_data_source)

@@ -4,7 +4,12 @@ This roadmap is ordered by dependency. A successor should not skip directly to a
 
 ## Phase 0. Stabilize the repository
 
-Status: **not completed**.
+Status: **Implemented and accepted in CPU CI only**.
+
+Stabilization PR `#35` was merged into `main` at
+`67b4eb25c3f74cdd142fb5802db57bcb57b72f19`. Normal Python 3.11 and 3.13 CI
+passed on `main`, the temporary one-shot M6C workflow was removed, and the
+package remained `0.12.0`.
 
 ### Required actions
 
@@ -36,7 +41,14 @@ Do not request another Mac execution before this phase passes.
 
 ## Phase 1. Reimplement M6C cleanly
 
-Status: **specified, failed draft exists, accepted implementation absent**.
+Status: **implemented and accepted on Apple M2 on PR `#36`**.
+
+The clean M6C branch adds checksummed profile and plan generation, public APIs,
+a `microcolossus-activation-plan` CLI, micro/tiny/small hybrid example
+configs, persistent nearest-anchor backward execution, root plan identity,
+resume rejection for changed plans or budgets, pruning compatibility,
+publication-failure coverage, and CPU tests. Normal CI and Apple M2 validation
+passed at commit `8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`.
 
 Issue `#27` is the requirements document.
 
@@ -213,7 +225,8 @@ no temporary workflow or payload file
 
 ## Phase 2. M6C Apple M2 gate
 
-Status: **blocked by Phase 1**.
+Status: **completed on PR `#36` at commit
+`8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`**.
 
 Compare `retain_all`, `recompute`, and `hybrid` on:
 
@@ -259,6 +272,15 @@ resume and pruning PASS
 ```
 
 A lower RSS is preferred but not mandatory. Raw physical measurements must be reported even when noisy or unfavorable.
+
+### Result
+
+The M6C Apple M2 gate passed for real-text micro, tiny, and real-text small.
+Hybrid retained positive forward-boundary bytes below retain_all, replayed
+fewer groups than recompute, reread fewer logical parameter bytes than
+recompute, and stayed within the declared numerical band. Resume, plan identity
+rejection, pruning followed by resume, simulated publication-failure recovery,
+fallback audit, and final Git integrity all passed.
 
 ## Phase 3. Remove validation-only full-state dependence
 

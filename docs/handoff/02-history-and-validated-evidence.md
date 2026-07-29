@@ -243,7 +243,9 @@ A second temporary branch, PR `#33`, contains checksummed patch payload parts an
 
 ## 4. Accepted baseline at handoff
 
-The latest accepted implementation remains **0.12.0**.
+The failed transfer attempts did not produce accepted M6C evidence. A later
+clean branch, PR `#36`, validated M6C on Apple M2 at commit
+`8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`.
 
 The accepted documentation baseline immediately before the failed M6C transfer experiments is:
 

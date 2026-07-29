@@ -13,6 +13,7 @@ from typing import Any
 
 from torch import Tensor
 
+from .activation_planner import ActivationMeasurementProfile, ActivationPlan
 from .bounded_optimizer import _initialize_adamw_payloads, _store_limits
 from .config import ExperimentConfig
 from .data import DataIdentity, PreparedDataSource, prepare_data_source
@@ -31,6 +32,7 @@ BOUNDED_TRAINING_SCHEMA_VERSION = "microcolossus.bounded-training.v3"
 TRAINING_METADATA_SCHEMA_VERSION = "microcolossus.training-metadata.v2"
 MULTI_STEP_RUNTIME_VERSION = "0.10.0"
 ACTIVATION_RECOMPUTE_RUNTIME_VERSION = "0.12.0"
+HYBRID_ACTIVATION_RUNTIME_VERSION = "0.13.0"
 BATCH_STREAM_VERSION = "configured-data-source-v1"
 SCHEDULE_KIND = "constant"
 
@@ -48,10 +50,17 @@ class TrainingMetadata:
     batch_stream: str
     schedule_kind: str
     data_identity: DataIdentity
+    activation_profile_checksum: str | None = None
+    activation_plan_checksum: str | None = None
+    activation_planner_version: str | None = None
+    activation_anchor_group_names: tuple[str, ...] = ()
+    activation_budget_bytes: int | None = None
+    workspace_budget_bytes: int | None = None
+    max_replay_depth: int | None = None
     metadata_checksum: str = ""
 
     def payload_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "schema_version": self.schema_version,
             "config_digest": self.config_digest,
             "runtime_version": self.runtime_version,
@@ -60,6 +69,17 @@ class TrainingMetadata:
             "schedule_kind": self.schedule_kind,
             "data_identity": self.data_identity.to_dict(),
         }
+        if self.activation_plan_checksum is not None:
+            value["activation_profile_checksum"] = self.activation_profile_checksum
+            value["activation_plan_checksum"] = self.activation_plan_checksum
+            value["activation_planner_version"] = self.activation_planner_version
+            value["activation_anchor_group_names"] = list(
+                self.activation_anchor_group_names
+            )
+            value["activation_budget_bytes"] = self.activation_budget_bytes
+            value["workspace_budget_bytes"] = self.workspace_budget_bytes
+            value["max_replay_depth"] = self.max_replay_depth
+        return value
 
     def compute_checksum(self) -> str:
         return sha256_hex(canonical_json_bytes(self.payload_dict()))
@@ -73,6 +93,13 @@ class TrainingMetadata:
             batch_stream=self.batch_stream,
             schedule_kind=self.schedule_kind,
             data_identity=self.data_identity,
+            activation_profile_checksum=self.activation_profile_checksum,
+            activation_plan_checksum=self.activation_plan_checksum,
+            activation_planner_version=self.activation_planner_version,
+            activation_anchor_group_names=self.activation_anchor_group_names,
+            activation_budget_bytes=self.activation_budget_bytes,
+            workspace_budget_bytes=self.workspace_budget_bytes,
+            max_replay_depth=self.max_replay_depth,
             metadata_checksum=self.compute_checksum(),
         )
 
@@ -100,6 +127,39 @@ class TrainingMetadata:
             batch_stream=str(value["batch_stream"]),
             schedule_kind=str(value["schedule_kind"]),
             data_identity=DataIdentity.from_dict(dict(value["data_identity"])),
+            activation_profile_checksum=(
+                None
+                if value.get("activation_profile_checksum") is None
+                else str(value["activation_profile_checksum"])
+            ),
+            activation_plan_checksum=(
+                None
+                if value.get("activation_plan_checksum") is None
+                else str(value["activation_plan_checksum"])
+            ),
+            activation_planner_version=(
+                None
+                if value.get("activation_planner_version") is None
+                else str(value["activation_planner_version"])
+            ),
+            activation_anchor_group_names=tuple(
+                str(item) for item in value.get("activation_anchor_group_names", ())
+            ),
+            activation_budget_bytes=(
+                None
+                if value.get("activation_budget_bytes") is None
+                else int(value["activation_budget_bytes"])
+            ),
+            workspace_budget_bytes=(
+                None
+                if value.get("workspace_budget_bytes") is None
+                else int(value["workspace_budget_bytes"])
+            ),
+            max_replay_depth=(
+                None
+                if value.get("max_replay_depth") is None
+                else int(value["max_replay_depth"])
+            ),
             metadata_checksum=str(value["metadata_checksum"]),
         )
         result.validate()
@@ -129,6 +189,10 @@ def _semantic_config(config: ExperimentConfig) -> dict[str, Any]:
     }
     if config.training.activation_policy != "retain_all":
         training["activation_policy"] = config.training.activation_policy
+    if config.training.activation_policy == "hybrid":
+        training["activation_anchor_policy"] = asdict(
+            config.training.activation_anchor_policy
+        )
     return {
         "model": asdict(config.model),
         "training": training,
@@ -152,12 +216,16 @@ def config_digest(config: ExperimentConfig) -> str:
 def _metadata_for(
     config: ExperimentConfig,
     data_source: PreparedDataSource,
+    *,
+    activation_profile: ActivationMeasurementProfile | None = None,
+    activation_plan: ActivationPlan | None = None,
 ) -> TrainingMetadata:
-    runtime_version = (
-        ACTIVATION_RECOMPUTE_RUNTIME_VERSION
-        if config.training.activation_policy == "recompute"
-        else MULTI_STEP_RUNTIME_VERSION
-    )
+    if config.training.activation_policy == "recompute":
+        runtime_version = ACTIVATION_RECOMPUTE_RUNTIME_VERSION
+    elif config.training.activation_policy == "hybrid":
+        runtime_version = HYBRID_ACTIVATION_RUNTIME_VERSION
+    else:
+        runtime_version = MULTI_STEP_RUNTIME_VERSION
     return TrainingMetadata(
         schema_version=TRAINING_METADATA_SCHEMA_VERSION,
         config_digest=config_digest(config),
@@ -166,6 +234,23 @@ def _metadata_for(
         batch_stream=data_source.identity.batch_stream_version,
         schedule_kind=SCHEDULE_KIND,
         data_identity=data_source.identity,
+        activation_profile_checksum=(
+            None if activation_profile is None else activation_profile.profile_checksum
+        ),
+        activation_plan_checksum=None if activation_plan is None else activation_plan.plan_checksum,
+        activation_planner_version=(
+            None if activation_plan is None else activation_plan.planner_version
+        ),
+        activation_anchor_group_names=(
+            () if activation_plan is None else activation_plan.selected_anchor_group_names
+        ),
+        activation_budget_bytes=(
+            None if activation_plan is None else activation_plan.activation_budget_bytes
+        ),
+        workspace_budget_bytes=(
+            None if activation_plan is None else activation_plan.workspace_budget_bytes
+        ),
+        max_replay_depth=None if activation_plan is None else activation_plan.max_replay_depth,
     ).with_checksum()
 
 
@@ -204,8 +289,16 @@ def _validate_resume_metadata(
     config: ExperimentConfig,
     metadata: TrainingMetadata,
     data_source: PreparedDataSource,
+    *,
+    activation_profile: ActivationMeasurementProfile | None = None,
+    activation_plan: ActivationPlan | None = None,
 ) -> None:
-    expected = _metadata_for(config, data_source)
+    expected = _metadata_for(
+        config,
+        data_source,
+        activation_profile=activation_profile,
+        activation_plan=activation_plan,
+    )
     mismatches: list[str] = []
     for name in (
         "config_digest",
@@ -213,6 +306,13 @@ def _validate_resume_metadata(
         "seed",
         "batch_stream",
         "schedule_kind",
+        "activation_profile_checksum",
+        "activation_plan_checksum",
+        "activation_planner_version",
+        "activation_anchor_group_names",
+        "activation_budget_bytes",
+        "workspace_budget_bytes",
+        "max_replay_depth",
     ):
         if getattr(metadata, name) != getattr(expected, name):
             mismatches.append(name)
@@ -316,10 +416,18 @@ def _initialize_training_root(
     config: ExperimentConfig,
     destination: Path,
     data_source: PreparedDataSource,
+    *,
+    activation_profile: ActivationMeasurementProfile | None = None,
+    activation_plan: ActivationPlan | None = None,
 ) -> tuple[StepBundleStore, StepBundleManifest, BundlePublicationTelemetry, TrainingMetadata]:
     seed_everything(config.training.seed)
     bundle_store = StepBundleStore.create(destination)
-    metadata = _metadata_for(config, data_source)
+    metadata = _metadata_for(
+        config,
+        data_source,
+        activation_profile=activation_profile,
+        activation_plan=activation_plan,
+    )
     _write_training_metadata(destination, metadata)
 
     parameter_store_path = destination / "candidates" / "step-0-parameters"
