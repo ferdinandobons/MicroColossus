@@ -13,21 +13,21 @@ The handoff has four purposes:
 
 ## Current summary
 
-The latest accepted product baseline is **MicroColossus 0.12.0**. It includes persistent activation recomputation and was validated on an 8 GB Apple M2 at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`.
+The latest target-validated product baseline is **MicroColossus 0.13.0**. It includes measured hybrid activation-anchor execution and was validated on an 8 GB Apple M2 at commit `8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`.
 
 The accepted documentation baseline before the M6C publication experiments is commit `9f9365e597693e2cffa4f454180203e7219a7cde`.
 
 At the time of this handoff:
 
-- the package on `main` still reports version `0.12.0`;
-- M6C, the measured hybrid activation-anchor planner, is not accepted or merged;
-- issue `#27` remains the authoritative M6C specification;
+- PR `#36` contains the target-validated M6C implementation and documentation updates;
+- issue `#27` remains the authoritative M6C specification until PR `#36` is merged or closed;
 - PR `#31` is a broken draft candidate and must not be merged;
 - PR `#33` is a temporary payload and workflow branch and must not be merged as product code;
-- `main` contains temporary CI and workflow edits from failed M6C publication attempts;
+- stabilization PR `#35` removed the temporary CI and workflow edits from failed M6C publication attempts;
 - no final MicroColossus 0.13.0 release exists yet.
 
-The first task for a successor is repository stabilization, not a new M2 benchmark.
+The next task is to finish review, merge PR `#36` when appropriate, and then
+continue toward the first larger-than-memory proof.
 
 ## Reading order
 

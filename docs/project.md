@@ -383,6 +383,7 @@ The two micro counts are intentionally different. The real-text model uses vocab
 | 0.10.0 | Deterministic local real-text trajectory, validation, samples, and resume | Validated on an 8 GB M2 after a protocol correction |
 | 0.11.0 | Safe retention, pruning journal, reclamation, and resume after pruning | Validated on an 8 GB M2 and APFS |
 | 0.12.0 | Persistent activation policies, recomputation, activation and workspace budgets | Validated on an 8 GB M2 |
+| 0.13.0 | Measured hybrid activation-anchor planner and nearest-anchor execution | Validated on an 8 GB M2 |
 
 Important accepted commits:
 
@@ -391,6 +392,7 @@ Important accepted commits:
 0.10.0 real text:       8bc277123267c3d3f15bf60cd640819fa823d2e3
 0.11.0 pruning fix:     1fedf611e7a090dad218be64811e0a4e007fbd77
 0.12.0 target gate:     4742f8a7f57a46edb075159275fb66c83c78ced7
+0.13.0 M6C target gate: 8e9b0f8e58fdaa288ba551d994d9b8b81adbea12
 ```
 
 ## 17. Accepted target evidence
@@ -497,7 +499,6 @@ Zero forward-boundary retention is a logical property. A useful policy must also
 
 MicroColossus does not yet establish:
 
-- Apple M2 accepted hybrid nearest-anchor execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict enforcement of total physical memory pressure;
@@ -522,7 +523,7 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 | M0 through M5. Resident, storage, bounded execution, resume, and real text | Completed and validated on M2 |
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
 | M6B. Persistent activation recomputation and strict activation/workspace budgets | Completed and validated on M2 |
-| M6C. Measured hybrid activation-anchor planner | Runtime implemented, not Apple M2 accepted |
+| M6C. Measured hybrid activation-anchor planner | Completed and validated on M2 |
 | M7. Asynchronous prefetch and writeback | Planned |
 | M8. Intra-layer tiling | Planned |
 | M9. Bounded MLX backward and optimizer execution | Planned |

@@ -14,8 +14,9 @@ MicroColossus does not yet claim complete out-of-core training or training state
 
 Version **0.13.0** adds the measured hybrid activation-anchor runtime on top
 of the accepted 0.12.0 recomputation baseline. Native Apple M2 validation for
-0.12.0 passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`; 0.13.0 is
-not target-accepted until the M6C Apple M2 gate passes.
+0.12.0 passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`. Native
+Apple M2 validation for 0.13.0 M6C passed on PR `#36` at commit
+`8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`.
 
 ## Why Apple Silicon changes the design
 
@@ -200,6 +201,7 @@ The corrected Apple M2/APFS validation demonstrated:
 | Deterministic real-text micro and 1.85M training | PASS |
 | Safe pruning and post-pruning resume | PASS |
 | Persistent activation recomputation | PASS |
+| Measured hybrid activation-anchor execution | PASS |
 
 The controlled resident 23,213,056-parameter benchmark produced:
 
@@ -303,7 +305,6 @@ microcolossus-prune apply \
 
 Not yet established:
 
-- Apple M2 accepted hybrid nearest-anchor execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict total physical-memory-pressure enforcement;

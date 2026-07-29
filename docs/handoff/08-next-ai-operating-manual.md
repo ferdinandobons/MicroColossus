@@ -6,26 +6,26 @@ This file describes how a new coding agent should take over the repository witho
 
 The successor owns implementation and GitHub publication.
 
-The project owner provides the Apple M2 for target-only execution. The intended division is:
+The project owner provides the Apple M2 for target execution. In the current
+operating model, the same coding agent runs those checks directly when it has
+access to the Mac:
 
 ```text
-successor AI:
+coding agent:
     design
     implementation
     tests
     documentation
     GitHub branches and PRs
     CI diagnosis
-    target validation prompts
-
-Mac validation AI:
     fresh checkout
     exact-commit execution
     MPS and APFS tests
     telemetry
-    artifacts
-    no product-source changes
 ```
+
+Target verification itself remains exact-commit scoped and must not modify
+tracked product source.
 
 ## 2. First actions
 

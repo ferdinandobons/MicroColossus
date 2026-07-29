@@ -1,6 +1,6 @@
-# Activation Policies and Recomputation
+# Activation Policies, Recomputation, and Hybrid Anchors
 
-This document defines MicroColossus M6B, the activation-memory layer that sits beside the existing bounded parameter, gradient, optimizer, checkpoint, and pruning runtimes.
+This document defines MicroColossus M6B and M6C, the activation-memory layer that sits beside the existing bounded parameter, gradient, optimizer, checkpoint, and pruning runtimes.
 
 ## 1. Motivation
 
@@ -21,7 +21,8 @@ hybrid
 ```
 
 `hybrid` is implemented by the M6C planner and persistent nearest-anchor
-runtime. It is not target-accepted until the Apple M2 M6C gate passes.
+runtime. It is accepted on Apple M2 for the tested micro, tiny, and small
+workloads at commit `8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`.
 
 ### `retain_all`
 
@@ -115,8 +116,7 @@ microcolossus-bounded-train \
   --workspace-working-set-mib 4
 ```
 
-This is **implemented but not target-accepted** until normal CI and the Apple
-M2 M6C gate pass.
+This is **implemented and target-accepted** for the tested M6C Apple M2 gate.
 
 ## 3. Persistent training
 
@@ -297,13 +297,55 @@ The target gate also passed:
 - fallback, unsupported-operator, and non-finite scans;
 - clean final Git state.
 
+### 9.5 M6C hybrid anchor evidence
+
+The native Apple M2 M6C validation tested commit:
+
+```text
+8e9b0f8e58fdaa288ba551d994d9b8b81adbea12
+```
+
+Package version: `0.13.0`.
+
+The quality gate passed Ruff, mypy, pytest, compileall, doctor, CLI preflight,
+and GitHub Actions on Python 3.11 and 3.13. Profile and plan generation was
+deterministic for identical inputs.
+
+The selected hybrid anchors were:
+
+| Workload | Selected anchors |
+|---|---|
+| Real-text micro | `embedding` |
+| Tiny | `block-0` |
+| Real-text small | `block-0`, `block-2` |
+
+The hybrid policy produced a logical Pareto intermediate point on every tested
+workload:
+
+| Workload | Retain bytes | Hybrid bytes | Recompute bytes | Hybrid replay groups | Recompute replay groups | Hybrid rereads | Recompute rereads |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Real-text micro | `16,384` | `8,192` | `0` | `5` | `15` | `166,400` | `576,000` |
+| Tiny | `98,304` | `32,768` | `0` | `6` | `18` | `2,955,264` | `8,865,792` |
+| Real-text small | `491,520` | `196,608` | `0` | `3` | `15` | `3,840,000` | `19,200,000` |
+
+All retain_all versus recompute, retain_all versus hybrid, and recompute versus
+hybrid state comparisons were `GREEN`. The largest observed maximum absolute
+state difference was `5.960464477539063e-08`. Candidate restore and final
+bundle restore were exact. Batch provenance, data identity, cursor sequences,
+and validation batch checksums matched across policies.
+
+Process resume, plan and profile identity rejection, pruning followed by
+hybrid resume, and both simulated publication-failure recovery paths passed.
+
 ## 10. Current claim boundary
 
-MicroColossus 0.12 establishes persistent multi-step training with either full boundary retention or synchronous zero-boundary prefix recomputation on Apple M2, including process resume, pruning compatibility, budget rejection, and atomic failure recovery.
+MicroColossus 0.13 establishes persistent multi-step training with full
+boundary retention, synchronous zero-boundary prefix recomputation, and
+measured hybrid nearest-anchor execution on Apple M2, including process resume,
+pruning compatibility, budget rejection, and atomic failure recovery.
 
-The accepted 0.12.0 target evidence does not yet establish:
+The accepted 0.13.0 target evidence does not yet establish:
 
-- Apple M2 accepted hybrid nearest-anchor execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - optimal replay scheduling;
@@ -314,4 +356,5 @@ The accepted 0.12.0 target evidence does not yet establish:
 - intra-layer activation tiling;
 - training state larger than unified memory.
 
-The next target milestone is M6C Apple M2 validation for the measured hybrid nearest-anchor runtime.
+The next target milestone is the first larger-than-memory proof with managed
+training state above the declared safe resident-memory limit.
