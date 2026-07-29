@@ -84,3 +84,34 @@ def test_bounded_training_cli_runs_persistent_recompute(tmp_path: Path, capsys) 
     assert output["maximum_retained_forward_boundary_bytes"] == 0
     assert output["total_prefix_replayed_groups"] > 0
     assert output["final_bundle_vs_restored_state"]["exact_bytes"]
+
+
+def test_bounded_training_cli_supports_integrity_only_validation(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    result = main(
+        [
+            "--config",
+            "examples/micro-storage.yaml",
+            "--bundle-store",
+            str(tmp_path / "integrity-bundle"),
+            "--target-step",
+            "1",
+            "--output",
+            str(tmp_path / "integrity-step-1.json"),
+            "--device",
+            "cpu",
+            "--validation-level",
+            "integrity_only",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert output["validation_level"] == "integrity_only"
+    assert output["final_bounded_vs_resident_state"] is None
+    assert output["final_bundle_vs_restored_state"] is None
+    assert not output["full_final_state_materialized_for_validation"]
+    assert output["steps"][0]["resident_vs_candidate_state"] is None
+    assert output["steps"][0]["candidate_vs_restored_state"] is None

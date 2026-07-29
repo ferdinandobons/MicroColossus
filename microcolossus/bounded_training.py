@@ -60,6 +60,18 @@ __all__ = [
 ]
 
 
+def _resolve_validation_level(
+    config: ExperimentConfig,
+    validation_level: str | None,
+) -> str:
+    resolved = (
+        config.training.validation_level if validation_level is None else validation_level
+    )
+    if resolved not in {"full", "integrity_only"}:
+        raise ValueError("validation_level must be one of: full, integrity_only")
+    return resolved
+
+
 def _resident_reference_state(
     config: ExperimentConfig,
     *,
@@ -147,6 +159,20 @@ def _current_bundle_state(
     gc.collect()
     synchronize_accelerator(device)
     return state, comparison, tuple(step_values)
+
+
+def _current_optimizer_step_values(
+    bundle_store: StepBundleStore,
+) -> tuple[tuple[str, float], ...]:
+    current = bundle_store.current_manifest()
+    optimizer_store = _open_referenced_store(bundle_store, current, kind="optimizer")
+    optimizer_records, _ = _optimizer_records(optimizer_store)
+    step_values: list[tuple[str, float]] = []
+    for parameter_name, records in sorted(optimizer_records.items()):
+        payload = optimizer_store.read_tensor(records["step"].tensor_id)
+        value = payload_to_torch(payload)
+        step_values.append((parameter_name, float(value.item())))
+    return tuple(step_values)
 
 
 def _ensure_current_progress(
@@ -273,9 +299,11 @@ def run_bounded_training(
     activation_working_set_bytes: int = 1024**2,
     workspace_working_set_bytes: int = 4 * 1024**2,
     bundle_failure_injector: BundleFailureInjector | None = None,
+    validation_level: str | None = None,
 ) -> BoundedTrainingResult:
     """Advance a persistent bounded training root to ``target_step``."""
 
+    resolved_validation_level = _resolve_validation_level(config, validation_level)
     if target_step < 0:
         raise ValueError("target_step cannot be negative")
     for value, name in (
@@ -359,6 +387,7 @@ def run_bounded_training(
             activation_profile=activation_profile,
             activation_plan=activation_plan,
             bundle_failure_injector=bundle_failure_injector,
+            validation_level=resolved_validation_level,
         )
         step_results.append(step)
         current = bundle_store.current_manifest()
@@ -391,18 +420,23 @@ def run_bounded_training(
     )
     if not bundle_ids_match:
         raise IntegrityError("progress bundle IDs do not match root bundle lineage")
-    current_state, current_vs_restored, optimizer_steps = _current_bundle_state(
-        config,
-        bundle_store,
-        device,
-    )
-    resident_state = _resident_reference_state(
-        config,
-        target_step=target_step,
-        device=device,
-        data_source=data_source,
-    )
-    bounded_vs_resident = compare_states(resident_state, current_state)
+    if resolved_validation_level == "full":
+        current_state, current_vs_restored, optimizer_steps = _current_bundle_state(
+            config,
+            bundle_store,
+            device,
+        )
+        resident_state = _resident_reference_state(
+            config,
+            target_step=target_step,
+            device=device,
+            data_source=data_source,
+        )
+        bounded_vs_resident = compare_states(resident_state, current_state)
+    else:
+        current_vs_restored = None
+        optimizer_steps = _current_optimizer_step_values(bundle_store)
+        bounded_vs_resident = None
     verification = bundle_store.verify(current.bundle_id)
     result = BoundedTrainingResult(
         schema_version=BOUNDED_TRAINING_SCHEMA_VERSION,
@@ -418,6 +452,7 @@ def run_bounded_training(
         initialized_bundle_id=initialized_bundle_id,
         initialization_publication=initialization_publication,
         activation_policy=config.training.activation_policy,
+        validation_level=resolved_validation_level,
         activation_working_set_budget_bytes=activation_working_set_bytes,
         workspace_working_set_budget_bytes=workspace_working_set_bytes,
         steps=tuple(step_results),
@@ -468,10 +503,24 @@ def run_bounded_training(
         total_optimizer_physical_bytes_written=sum(
             item.total_optimizer_physical_bytes_written for item in step_results
         ),
+        full_final_state_materialized_for_validation=(
+            resolved_validation_level == "full"
+        ),
+        resident_reference_replayed_from_step_zero=resolved_validation_level == "full",
+        validation_omitted_checks=(
+            ()
+            if resolved_validation_level == "full"
+            else (
+                "final_bounded_vs_resident_state",
+                "final_bundle_vs_restored_state",
+                "resident_reference_replay_from_step_zero",
+            )
+        ),
     )
     if output_path is not None:
         write_json_atomic(output_path, result)
-    del current_state, resident_state
+    if resolved_validation_level == "full":
+        del current_state, resident_state
     gc.collect()
     synchronize_accelerator(device)
     return result

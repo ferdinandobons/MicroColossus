@@ -102,6 +102,7 @@ class TrainingConfig:
     device: str = "auto"
     mode: str = "reference"
     activation_policy: str = "retain_all"
+    validation_level: str = "full"
     activation_anchor_policy: ActivationAnchorPolicyConfig = field(
         default_factory=ActivationAnchorPolicyConfig
     )
@@ -125,6 +126,10 @@ class TrainingConfig:
         if self.activation_policy not in {"retain_all", "recompute", "hybrid"}:
             raise ValueError(
                 "training.activation_policy must be one of: retain_all, recompute, hybrid"
+            )
+        if self.validation_level not in {"full", "integrity_only"}:
+            raise ValueError(
+                "training.validation_level must be one of: full, integrity_only"
             )
 
     @classmethod

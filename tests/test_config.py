@@ -24,6 +24,18 @@ def test_mps_is_an_accepted_device() -> None:
     assert TrainingConfig(device="mps").device == "mps"
 
 
+def test_integrity_only_validation_level_is_accepted() -> None:
+    assert (
+        TrainingConfig(validation_level="integrity_only").validation_level
+        == "integrity_only"
+    )
+
+
+def test_unknown_validation_level_is_rejected() -> None:
+    with pytest.raises(ValueError, match="validation_level"):
+        TrainingConfig(validation_level="sampled")
+
+
 def test_legacy_vram_budget_is_accepted() -> None:
     budget = HardwareBudget.from_mapping({"vram_gib": 4.0})
     assert budget.accelerator_memory_gib == 4.0

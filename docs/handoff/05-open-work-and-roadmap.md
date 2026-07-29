@@ -284,7 +284,7 @@ fallback audit, and final Git integrity all passed.
 
 ## Phase 3. Remove validation-only full-state dependence
 
-Status: **not started**.
+Status: **started, not accepted**.
 
 The current development path materializes complete state for oracle and verification operations. A larger-than-memory claim requires a mode where these operations are disabled, sampled, streamed, or moved to a separate machine or phase.
 
@@ -297,6 +297,24 @@ The current development path materializes complete state for oracle and verifica
 - avoid full model materialization for generation in capacity mode;
 - report exactly which checks were omitted;
 - keep full validation as the default for micro and small development tests.
+
+### Initial implementation
+
+The current development branch introduces:
+
+- `training.validation_level: full` as the default;
+- `training.validation_level: integrity_only` for persistent bounded training;
+- `microcolossus-bounded-train --validation-level integrity_only`;
+- explicit `validation_omitted_checks` result fields;
+- skipped per-step resident optimizer oracle comparison;
+- skipped per-step candidate full-restore comparison;
+- skipped final resident replay and final full-restore comparison;
+- continued candidate-store, root-bundle, lineage, progress, data-identity, and
+  optimizer-step integrity checks.
+
+This is not yet the full Phase 3 acceptance point because lower-level backward
+gradient oracle validation, evaluation, and generation can still materialize
+resident state.
 
 ### Acceptance
 

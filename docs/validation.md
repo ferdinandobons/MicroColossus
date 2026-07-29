@@ -490,6 +490,7 @@ It does not establish activation storage or offload, asynchronous overlap, direc
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
 | M6B. Persistent activation recomputation and strict budgets | Completed and validated on M2 |
 | M6C. Measured hybrid activation-anchor planner | Completed and validated on M2 |
+| Phase 3. Explicit persistent-training validation policy | Implemented but not accepted |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
 | Bounded MLX backward and optimizer execution | Not started |
@@ -574,28 +575,19 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 
 ## 15. Next engineering gate
 
-The next target gate is M6C Apple M2 validation for the measured hybrid
-activation-anchor runtime.
+The next engineering gate is Phase 3: remove or reduce validation-only
+full-state materialization before any larger-than-memory claim.
 
-The 0.13.0 implementation adds deterministic activation measurement profiles,
-canonical profile and plan checksums, retain-all, recompute, fixed-interval,
-and measured-budget schedule summaries, public APIs,
-`microcolossus-activation-plan`, hybrid examples, persistent nearest-anchor
-backward execution, plan identity in root metadata, resume rejection for changed
-hybrid plans or budgets, pruning compatibility, and publication-failure
-coverage.
+The current development branch introduces an explicit persistent-training
+`validation_level` with `full` as the default and `integrity_only` as the first
+capacity-mode preparation. `integrity_only` skips complete parameter plus
+optimizer oracle comparison, candidate restore comparison, final resident
+replay, and final full-state restore comparison. It still verifies candidate
+stores, root authority, lineage, progress records, data identity, activation
+identity, and optimizer step tensors.
 
-The planner must use the accepted M2 observations rather than an arbitrary checkpoint interval. It should search for a Pareto improvement across:
-
-- retained anchor bytes;
-- local workspace;
-- replayed group count;
-- logical parameter rereads;
-- recomputation time;
-- end-to-end step time;
-- RSS;
-- MPS allocation;
-- Metal-driver allocation;
-- swap and memory pressure.
-
-Correctness, resume, pruning, tied-weight semantics, and atomic publication must remain unchanged.
+This is not yet accepted evidence. It also does not remove lower-level resident
+gradient oracle validation, evaluation materialization, or generation
+materialization. Those remaining validation paths must be disabled, sampled,
+streamed, or externalized before a larger-than-memory capacity run can rely on
+this mode.

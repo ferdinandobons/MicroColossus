@@ -58,6 +58,15 @@ def _parser() -> argparse.ArgumentParser:
         default=4.0,
         help="maximum logical local forward/backward activation workspace",
     )
+    parser.add_argument(
+        "--validation-level",
+        choices=("full", "integrity_only"),
+        default=None,
+        help=(
+            "validation policy: full keeps resident oracle comparisons; "
+            "integrity_only skips complete parameter+optimizer comparison materialization"
+        ),
+    )
     return parser
 
 
@@ -78,6 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         optimizer_working_set_bytes=int(args.optimizer_working_set_mib * mib),
         activation_working_set_bytes=int(args.activation_working_set_mib * mib),
         workspace_working_set_bytes=int(args.workspace_working_set_mib * mib),
+        validation_level=args.validation_level,
     )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return 0

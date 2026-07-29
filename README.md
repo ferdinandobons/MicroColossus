@@ -39,10 +39,16 @@ Current state:
   deterministic profiles and plans, checksum/provenance equivalence, numerical
   state comparison, process resume, plan identity rejection, pruning followed
   by resume, and simulated publication-failure recovery.
+- Phase 3 capacity-mode preparation has started on the current development
+  branch: `training.validation_level: integrity_only` lets persistent bounded
+  training skip complete parameter plus optimizer validation comparisons while
+  preserving storage and checkpoint integrity checks.
 
 Still incomplete:
 
 - No final MicroColossus 0.13.0 tag or GitHub Release exists.
+- Phase 3 is not accepted yet; lower-level resident gradient oracle,
+  evaluation, and generation paths can still materialize resident state.
 - The project still does not claim larger-than-memory training, activation
   tensor offload, asynchronous I/O, direct NVMe behavior, intra-layer tiling,
   or bounded MLX backward and optimizer execution.

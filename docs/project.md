@@ -524,6 +524,7 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
 | M6B. Persistent activation recomputation and strict activation/workspace budgets | Completed and validated on M2 |
 | M6C. Measured hybrid activation-anchor planner | Completed and validated on M2 |
+| Phase 3. Validation policy without full parameter+optimizer materialization | Started |
 | M7. Asynchronous prefetch and writeback | Planned |
 | M8. Intra-layer tiling | Planned |
 | M9. Bounded MLX backward and optimizer execution | Planned |
@@ -552,5 +553,6 @@ A meaningful capacity demonstration requires:
 - [`real-text.md`](real-text.md). Data identity, tokenizer, validation, samples, and real-text evidence.
 - [`pruning.md`](pruning.md). Retention, planning, apply, journal, recovery, and M2 pruning evidence.
 - [`activations.md`](activations.md). Activation policies, recomputation, budgets, telemetry, and accepted M2 evidence.
+- [`validation-policy.md`](validation-policy.md). Explicit validation levels and the boundary of capacity-mode preparation.
 - [`validation.md`](validation.md). Accepted executable evidence and exact claim boundaries.
 - [`competitive.md`](competitive.md). Backend and optimization decisions supported by measurements.

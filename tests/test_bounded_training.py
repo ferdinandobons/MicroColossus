@@ -107,6 +107,71 @@ def test_bounded_training_advances_three_steps_exactly(tmp_path: Path) -> None:
     assert StepBundleStore.open(tmp_path / "bundle").verify().committed_step == 3
 
 
+def test_integrity_only_validation_skips_full_state_comparisons(
+    tmp_path: Path,
+) -> None:
+    result = run_bounded_training(
+        _config(tmp_path),
+        bundle_store_path=tmp_path / "bundle",
+        target_step=2,
+        output_path=tmp_path / "result.json",
+        device_override="cpu",
+        optimizer_working_set_bytes=1024**2,
+        validation_level="integrity_only",
+    )
+
+    assert result.validation_level == "integrity_only"
+    assert result.final_step == 2
+    assert result.final_bounded_vs_resident_state is None
+    assert result.final_bundle_vs_restored_state is None
+    assert not result.full_final_state_materialized_for_validation
+    assert not result.resident_reference_replayed_from_step_zero
+    assert result.validation_omitted_checks == (
+        "final_bounded_vs_resident_state",
+        "final_bundle_vs_restored_state",
+        "resident_reference_replay_from_step_zero",
+    )
+    assert all(item.validation_level == "integrity_only" for item in result.steps)
+    assert all(item.oracle_state_store_path is None for item in result.steps)
+    assert all(item.resident_vs_candidate_state is None for item in result.steps)
+    assert all(item.candidate_vs_restored_state is None for item in result.steps)
+    assert not any(
+        item.full_candidate_state_materialized_for_validation for item in result.steps
+    )
+    assert all(item.resident_oracle_materialized_for_validation for item in result.steps)
+    assert all(value == 2.0 for _, value in result.optimizer_step_values)
+    assert StepBundleStore.open(tmp_path / "bundle").verify().committed_step == 2
+
+
+def test_validation_level_change_is_allowed_on_resume(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    bundle_path = tmp_path / "bundle"
+    run_bounded_training(
+        config,
+        bundle_store_path=bundle_path,
+        target_step=1,
+        device_override="cpu",
+        optimizer_working_set_bytes=1024**2,
+    )
+    integrity_config = replace(
+        config,
+        training=replace(config.training, validation_level="integrity_only"),
+    )
+
+    result = run_bounded_training(
+        integrity_config,
+        bundle_store_path=bundle_path,
+        target_step=2,
+        device_override="cpu",
+        optimizer_working_set_bytes=1024**2,
+    )
+
+    assert result.resumed
+    assert result.started_step == 1
+    assert result.validation_level == "integrity_only"
+    assert result.final_step == 2
+
+
 def test_resumed_training_matches_uninterrupted_training(tmp_path: Path) -> None:
     config = _config(tmp_path)
     first = run_bounded_training(

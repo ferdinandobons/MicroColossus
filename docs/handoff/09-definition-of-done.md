@@ -233,8 +233,8 @@ The current project is not close to this level and should not be described as pr
 | Real-text learning and resume | Complete and target-validated |
 | Safe pruning | Complete and target-validated |
 | Full-prefix activation recomputation | Complete and target-validated |
-| Measured hybrid anchors | Not accepted |
-| Validation path without full-state materialization | Not started |
+| Measured hybrid anchors | Complete and target-validated |
+| Validation path without full-state materialization | Started, not accepted |
 | Physical-memory controller | Not started |
 | Intra-layer tiling | Not started |
 | Larger-than-memory proof | Not demonstrated |

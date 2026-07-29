@@ -149,7 +149,10 @@ def advance_one_step(
     activation_profile: ActivationMeasurementProfile | None = None,
     activation_plan: ActivationPlan | None = None,
     bundle_failure_injector: BundleFailureInjector | None = None,
+    validation_level: str = "full",
 ) -> PersistentStepResult:
+    if validation_level not in {"full", "integrity_only"}:
+        raise ValueError("validation_level must be one of: full, integrity_only")
     next_step = current.committed_step + 1
     if batch_cursor != current.committed_step:
         raise IntegrityError("batch cursor and committed step must advance together")
@@ -285,19 +288,24 @@ def advance_one_step(
         )
 
     gradient_store = VersionedTensorStore.open(gradient_store_path)
-    resident_loss, _ = _resident_oracle_from_current_state(
-        config,
-        parameter_store=parameter_store,
-        optimizer_store=optimizer_store,
-        oracle_store_path=oracle_state_store_path,
-        input_ids=input_ids,
-        targets=targets,
-        device=device,
-        clipping_coefficient=clipping_coefficient,
-        committed_step=next_step,
-    )
-    if abs(resident_loss - backward_resident_loss) > 1e-5:
-        raise RuntimeError("resident optimizer oracle loss differs from backward oracle loss")
+    if validation_level == "full":
+        resident_loss, _ = _resident_oracle_from_current_state(
+            config,
+            parameter_store=parameter_store,
+            optimizer_store=optimizer_store,
+            oracle_store_path=oracle_state_store_path,
+            input_ids=input_ids,
+            targets=targets,
+            device=device,
+            clipping_coefficient=clipping_coefficient,
+            committed_step=next_step,
+        )
+        if abs(resident_loss - backward_resident_loss) > 1e-5:
+            raise RuntimeError(
+                "resident optimizer oracle loss differs from backward oracle loss"
+            )
+    else:
+        resident_loss = backward_resident_loss
 
     parameter_records = _parameter_records(parameter_store)
     gradient_records = _gradient_records(gradient_store)
@@ -459,30 +467,44 @@ def advance_one_step(
 
     candidate_parameter_store.verify()
     candidate_optimizer_store.verify()
-    oracle_state_store = VersionedTensorStore.open(oracle_state_store_path)
-    oracle_state = _store_payloads(oracle_state_store)
-    candidate_state = tuple(
-        sorted(
-            _store_payloads(candidate_parameter_store)
-            + _store_payloads(candidate_optimizer_store),
-            key=lambda item: item.logical_name,
+    if validation_level == "full":
+        oracle_state_store = VersionedTensorStore.open(oracle_state_store_path)
+        oracle_state = _store_payloads(oracle_state_store)
+        candidate_state = tuple(
+            sorted(
+                _store_payloads(candidate_parameter_store)
+                + _store_payloads(candidate_optimizer_store),
+                key=lambda item: item.logical_name,
+            )
         )
-    )
-    resident_vs_candidate = compare_states(oracle_state, candidate_state)
+        resident_vs_candidate = compare_states(oracle_state, candidate_state)
 
-    restored_model = DecoderOnlyTransformer(config.model).to(device)
-    restored_optimizer = torch.optim.AdamW(
-        restored_model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
-        foreach=False,
-    )
-    restore_pytorch_state(restored_model, candidate_state, optimizer=restored_optimizer)
-    restored_state = export_pytorch_state(restored_model, restored_optimizer)
-    candidate_vs_restored = compare_states(candidate_state, restored_state)
-    del restored_state, restored_optimizer, restored_model
-    gc.collect()
-    synchronize_accelerator(device)
+        restored_model = DecoderOnlyTransformer(config.model).to(device)
+        restored_optimizer = torch.optim.AdamW(
+            restored_model.parameters(),
+            lr=config.training.learning_rate,
+            weight_decay=config.training.weight_decay,
+            foreach=False,
+        )
+        restore_pytorch_state(
+            restored_model,
+            candidate_state,
+            optimizer=restored_optimizer,
+        )
+        restored_state = export_pytorch_state(restored_model, restored_optimizer)
+        candidate_vs_restored = compare_states(candidate_state, restored_state)
+        del (
+            restored_state,
+            restored_optimizer,
+            restored_model,
+            oracle_state,
+            candidate_state,
+        )
+        gc.collect()
+        synchronize_accelerator(device)
+    else:
+        resident_vs_candidate = None
+        candidate_vs_restored = None
 
     pre_publish_current = bundle_store.current_manifest()
     final_bundle, final_publication = bundle_store.publish(
@@ -516,9 +538,12 @@ def advance_one_step(
         gradient_store_path=str(gradient_store_path),
         candidate_parameter_store_path=str(candidate_parameter_store_path),
         candidate_optimizer_store_path=str(candidate_optimizer_store_path),
-        oracle_state_store_path=str(oracle_state_store_path),
+        oracle_state_store_path=(
+            str(oracle_state_store_path) if validation_level == "full" else None
+        ),
         bounded_backward_result_path=str(backward_result_path),
         activation_policy=config.training.activation_policy,
+        validation_level=validation_level,
         parameter_working_set_budget_bytes=parameter_working_set_bytes,
         gradient_working_set_budget_bytes=gradient_working_set_bytes,
         optimizer_working_set_budget_bytes=optimizer_working_set_bytes,
@@ -582,8 +607,18 @@ def advance_one_step(
         total_optimizer_physical_bytes_written=sum(
             item.optimizer_physical_bytes_written for item in optimizer_metrics
         ),
+        full_candidate_state_materialized_for_validation=validation_level == "full",
+        resident_oracle_materialized_for_validation=True,
+        validation_omitted_checks=(
+            ()
+            if validation_level == "full"
+            else (
+                "resident_optimizer_oracle",
+                "resident_vs_candidate_state",
+                "candidate_vs_restored_state",
+            )
+        ),
     )
-    del oracle_state, candidate_state
     gc.collect()
     synchronize_accelerator(device)
     return result
