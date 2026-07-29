@@ -161,8 +161,11 @@ def system_memory_sample() -> tuple[int, float, int]:
     """Return available memory, memory percentage, and swap usage."""
 
     memory = psutil.virtual_memory()
-    swap = psutil.swap_memory()
-    return int(memory.available), float(memory.percent), int(swap.used)
+    try:
+        swap_used_bytes = int(psutil.swap_memory().used)
+    except OSError:
+        swap_used_bytes = 0
+    return int(memory.available), float(memory.percent), swap_used_bytes
 
 
 def summarize_steps(
