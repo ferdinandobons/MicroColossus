@@ -1,0 +1,1 @@
+Trigger the trusted CI publication job for the clean M6C branch.
