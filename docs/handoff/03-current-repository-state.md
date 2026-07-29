@@ -98,7 +98,7 @@ The issue correctly requires:
 
 The issue remains open and should stay open until a clean implementation and target gate pass.
 
-## 5. Open pull requests that must not be merged
+## 5. M6C pull requests abandoned
 
 ### PR #29
 
@@ -106,7 +106,7 @@ The issue remains open and should stay open until a clean implementation and tar
 title:     M6C: Add measured hybrid activation anchors
 branch:    agent/m6c-hybrid-anchors
 head:      c1d71a898eba2011b86846294fc4ec4a50a049af
-state:     open draft
+state:     closed draft
 ```
 
 Its changed files are temporary patch/export transfer material:
@@ -125,7 +125,7 @@ It does not contain a normal reviewable implementation and must not be merged.
 title:     Add measured hybrid activation-anchor planning
 branch:    agent/m6c-hybrid-activation-planner
 head:      2077314ecf55a55d3d788731eaa057dd0ed354df
-state:     open draft
+state:     closed draft
 ```
 
 This branch contains an incomplete and structurally broken candidate. Its M2 diagnostic stopped at the quality gate. It should be treated as a failed experiment and reference material only.
@@ -136,7 +136,7 @@ This branch contains an incomplete and structurally broken candidate. Its M2 dia
 title:     Apply clean M6C implementation
 branch:    agent/m6c-hybrid-clean
 head:      e83f4b6445a0da81178954f02dcd5c2b2a0d7071
-state:     open draft
+state:     closed draft
 ```
 
 Its changed files are temporary transfer material:
@@ -209,6 +209,10 @@ Python 3.11.15:
 The local `doctor` runs reported `mps_built: true` and `mps_available: false`.
 Therefore this stabilization result is CPU-only and does not validate Apple M2,
 MPS, APFS, physical-memory, or performance behavior.
+
+After publishing the stabilization branch, PR `#29`, PR `#31`, and PR `#33`
+were closed as abandoned M6C transfer or draft experiments. Issue `#27` remains
+open. The only open pull request is stabilization PR `#35`.
 
 ## 7. Safe starting points
 
