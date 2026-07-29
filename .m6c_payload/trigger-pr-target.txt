@@ -1,0 +1,1 @@
+Trigger trusted pull_request_target application for the checksummed clean patch.
