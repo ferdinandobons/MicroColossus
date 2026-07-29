@@ -1,11 +1,7 @@
 name: Export M6C source
 
 on:
-  push:
-    branches:
-      - agent/m6c-hybrid-activation-planner
-    paths:
-      - .github/workflows/export-m6c-source.yml
+  pull_request:
 
 jobs:
   export:
