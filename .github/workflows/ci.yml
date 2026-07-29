@@ -219,24 +219,45 @@ jobs:
           ref: agent/m6c-hybrid-clean
           fetch-depth: 0
       - name: Apply checksummed clean M6C patch
+        id: m6c_publish
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          if ! compgen -G '.m6c_payload/part*' > /dev/null; then
-            echo 'Clean implementation already published.'
-            exit 0
-          fi
-          cat .m6c_payload/part* > /tmp/m6c.patch.gz.b64
-          base64 -d /tmp/m6c.patch.gz.b64 > /tmp/m6c.patch.gz
-          echo 'f76b0c91790fb1e94fc23409dc824f7d74abc28464c0cf189a43da97ce1cf6b7  /tmp/m6c.patch.gz' | sha256sum -c -
-          gzip -dc /tmp/m6c.patch.gz > /tmp/m6c.patch
-          echo 'ae0ae5b7d401e7ed7403cd2b243a2ebfface7f7f31fc3b663f04b61cb16870cd  /tmp/m6c.patch' | sha256sum -c -
-          git reset --hard 9f9365e597693e2cffa4f454180203e7219a7cde
-          git clean -fdx
-          git apply --index /tmp/m6c.patch
-          git diff --cached --check
-          python -m compileall -q microcolossus
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git commit -m 'Add measured hybrid activation-anchor planning'
-          git push --force origin HEAD:agent/m6c-hybrid-clean
+          set +e
+          : > /tmp/m6c-publish.log
+          {
+            set -euo pipefail
+            if ! compgen -G '.m6c_payload/part*' > /dev/null; then
+              echo 'Clean implementation already published.'
+              exit 0
+            fi
+            cat .m6c_payload/part* > /tmp/m6c.patch.gz.b64
+            base64 -d /tmp/m6c.patch.gz.b64 > /tmp/m6c.patch.gz
+            echo 'f76b0c91790fb1e94fc23409dc824f7d74abc28464c0cf189a43da97ce1cf6b7  /tmp/m6c.patch.gz' | sha256sum -c -
+            gzip -dc /tmp/m6c.patch.gz > /tmp/m6c.patch
+            echo 'ae0ae5b7d401e7ed7403cd2b243a2ebfface7f7f31fc3b663f04b61cb16870cd  /tmp/m6c.patch' | sha256sum -c -
+            git reset --hard 9f9365e597693e2cffa4f454180203e7219a7cde
+            git clean -fdx
+            git apply --index /tmp/m6c.patch
+            git diff --cached --check
+            python -m compileall -q microcolossus
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git commit -m 'Add measured hybrid activation-anchor planning'
+            git push --force origin HEAD:agent/m6c-hybrid-clean
+          } >> /tmp/m6c-publish.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          cat /tmp/m6c-publish.log
+          exit "$status"
+      - name: Upload M6C publication diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6c-publication-diagnostics
+          path: /tmp/m6c-publish.log
+          if-no-files-found: error
+      - name: Fail when M6C publication failed
+        if: steps.m6c_publish.outputs.status != '0'
+        run: exit 1
+
