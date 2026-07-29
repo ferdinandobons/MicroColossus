@@ -99,9 +99,10 @@ MicroColossus has not yet demonstrated complete larger-than-memory training.
 
 ## D. Current repository warning
 
-At the handoff snapshot, `main` still reported version 0.12.0 but had temporary workflow changes from failed M6C publication attempts.
+At the original handoff snapshot, `main` still reported version 0.12.0 but had temporary workflow changes from failed M6C publication attempts. That stabilization work has since been completed.
 
-Issue `#27` is the authoritative M6C specification.
+Issue `#27` was the authoritative M6C specification and is now closed after PR
+`#36` merged.
 
 PR `#31` is a broken draft candidate. Do not merge it.
 
@@ -162,11 +163,12 @@ self-modifying source publication steps
 
 Close PR `#31` and PR `#33` as abandoned after preserving any useful technical notes.
 
-Keep issue `#27` open.
+Keep future milestone issues open until their clean implementation and target
+gate pass.
 
 ### E4. Stabilization acceptance
 
-Do not implement M6C until a clean branch has:
+M6C was not implemented until a clean branch had:
 
 ```text
 package import PASS
@@ -237,7 +239,8 @@ Mac action required now: yes or no
 
 ## H. M6C implementation mission
 
-After repository stabilization, implement issue `#27` cleanly as MicroColossus 0.13.0.
+After repository stabilization, issue `#27` was implemented cleanly as
+MicroColossus 0.13.0.
 
 Do not copy the broken PR blindly. You may inspect it for ideas, but audit every line against accepted 0.12 APIs and invariants.
 

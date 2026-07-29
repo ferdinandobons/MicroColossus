@@ -505,7 +505,7 @@ The native Apple M2 validation tested commit:
 
 Package version: `0.13.0`.
 
-Overall result: **PASS** for the current PR diagnostic gate.
+Overall result: **PASS** for the merged `main` M6C gate.
 
 The quality gate passed Ruff, mypy, pytest, compileall, doctor, CLI preflight,
 and GitHub Actions on Python 3.11 and 3.13. The target run used native arm64

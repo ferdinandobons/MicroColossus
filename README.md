@@ -20,19 +20,21 @@ Apple M2 validation for 0.13.0 M6C passed on PR `#36` at commit
 
 ## Current status
 
-As of 2026-07-29, the current development head is PR `#36`
-(`agent/m6c-profile-planner`) at commit
-`e3de605119dc8bf481a03ddc38283879fcc350ee`.
+As of 2026-07-29, this is an incomplete post-merge status snapshot. M6C is on
+`main` via merge commit `db6a4727b2c560412e57ecf74a00c0077d785e31`, which
+merged PR `#36`.
 
 Current state:
 
-- PR `#36` is open and still marked draft, with a clean merge state.
-- GitHub Actions run `30465100374` passed on Python 3.11 and 3.13, including
+- PR `#36` is merged into `main`.
+- M6C issue `#27` is closed with target-validation evidence.
+- GitHub Actions run `30468692291` passed on `main` for Python 3.11 and 3.13, including
   lint, type check, pytest, compile, and CPU smoke.
 - Local gates also passed on the Apple M2 development machine: Ruff, mypy,
   pytest, compileall, and `microcolossus doctor`.
 - The M6C Apple M2 target validation passed on the runtime commit
-  `8e9b0f8e58fdaa288ba551d994d9b8b81adbea12` before this documentation commit.
+  `8e9b0f8e58fdaa288ba551d994d9b8b81adbea12`; the later merge and documentation
+  commits did not change that runtime behavior.
 - The validated M6C scope covers micro, tiny, and small MPS policy comparisons,
   deterministic profiles and plans, checksum/provenance equivalence, numerical
   state comparison, process resume, plan identity rejection, pruning followed
@@ -40,7 +42,6 @@ Current state:
 
 Still incomplete:
 
-- PR `#36` has not been merged into `main`.
 - No final MicroColossus 0.13.0 tag or GitHub Release exists.
 - The project still does not claim larger-than-memory training, activation
   tensor offload, asynchronous I/O, direct NVMe behavior, intra-layer tiling,

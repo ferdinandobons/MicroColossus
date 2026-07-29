@@ -38,10 +38,10 @@ The accepted documentation and repository baseline before the M6C publication ex
 9f9365e597693e2cffa4f454180203e7219a7cde
 ```
 
-At handoff time, `pyproject.toml` on `main` still reports `0.12.0`, and the planner console script for 0.13.0 is not present.
+At handoff time, `pyproject.toml` on `main` still reported `0.12.0`, and the planner console script for 0.13.0 was not present.
 
-The current target-validated M6C branch reports `0.13.0`; see section 6.3 for
-the exact commit and validation boundary.
+The merged target-validated `main` line now reports `0.13.0`; see section 6.3
+for the exact commit and validation boundary.
 
 ## 3. Pre-handoff `main` condition
 
@@ -83,9 +83,9 @@ It is a one-shot `pull_request_target` workflow with `contents: write`. It recon
 
 This workflow must be removed. It is not part of MicroColossus runtime architecture and should not remain enabled.
 
-## 4. Open M6C issue
+## 4. M6C issue
 
-Issue `#27` is the authoritative M6C design specification:
+Issue `#27` was the authoritative M6C design specification:
 
 ```text
 M6C: Add a measured hybrid activation-anchor planner
@@ -103,7 +103,7 @@ The issue correctly requires:
 - CPU CI on Python 3.11 and 3.13;
 - Apple M2 comparison on micro, tiny, and small workloads.
 
-The issue remains open and should stay open until a clean implementation and target gate pass.
+The issue was closed after PR `#36` merged and the Apple M2 target gate passed.
 
 ## 5. M6C pull requests abandoned
 
@@ -290,11 +290,11 @@ MLX optimization, or intra-layer tiling.
 
 ## 7. Safe starting points
 
-The current safe starting point for post-M6C work is PR `#36` on branch
-`agent/m6c-profile-planner`, after normal CI is green.
+The current safe starting point for post-M6C work is `main` at merge commit
+`db6a4727b2c560412e57ecf74a00c0077d785e31` or later, after normal CI is green.
 
-Historical fallback, if PR `#36` is abandoned for reasons unrelated to the
-runtime implementation:
+Historical fallback, only if the merged M6C line must be abandoned for reasons
+unrelated to the runtime implementation:
 
 ```text
 9f9365e597693e2cffa4f454180203e7219a7cde
@@ -302,7 +302,7 @@ runtime implementation:
 
 That fallback returns to the accepted pre-M6C documentation baseline and should
 only be used after preserving the evidence that PR `#36` produced a passing
-target run.
+target run and was merged.
 
 ## 8. What not to do
 

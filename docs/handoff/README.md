@@ -19,15 +19,14 @@ The accepted documentation baseline before the M6C publication experiments is co
 
 At the time of this handoff:
 
-- PR `#36` contains the target-validated M6C implementation and documentation updates;
-- issue `#27` remains the authoritative M6C specification until PR `#36` is merged or closed;
+- PR `#36` has been merged into `main`;
+- issue `#27` has been closed with target-validation evidence;
 - PR `#31` is a broken draft candidate and must not be merged;
 - PR `#33` is a temporary payload and workflow branch and must not be merged as product code;
 - stabilization PR `#35` removed the temporary CI and workflow edits from failed M6C publication attempts;
 - no final MicroColossus 0.13.0 release exists yet.
 
-The next task is to finish review, merge PR `#36` when appropriate, and then
-continue toward the first larger-than-memory proof.
+The next task is to continue toward the first larger-than-memory proof.
 
 ## Reading order
 
