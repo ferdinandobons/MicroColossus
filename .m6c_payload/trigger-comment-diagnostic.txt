@@ -1,0 +1,1 @@
+Trigger PR-comment diagnostics for the clean M6C patch.
