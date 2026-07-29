@@ -214,11 +214,19 @@ After publishing the stabilization branch, PR `#29`, PR `#31`, and PR `#33`
 were closed as abandoned M6C transfer or draft experiments. Issue `#27` remains
 open. The only open pull request is stabilization PR `#35`.
 
-GitHub Actions did not start the PR `#35` jobs because the repository account
-reported failed payments or a spending-limit block. This is an external CI
-availability blocker, not a code failure observed in the runner logs. The PR
-must remain draft until billing is resolved and the restored Python 3.11 and
-3.13 CI matrix passes on GitHub.
+After the repository was made public, the failed GitHub Actions run was rerun
+successfully:
+
+```text
+GitHub Actions run: 30445835728
+Python 3.11 job:    PASS, 14m2s
+Python 3.13 job:    PASS, 13m34s
+```
+
+This completes the restored CI matrix for stabilization PR `#35`. The skipped
+`Apply clean M6C patch once` check came from the obsolete `pull_request_target`
+workflow still present on `main` before this stabilization PR is merged; the PR
+removes that workflow from the product branch.
 
 ## 7. Safe starting points
 
