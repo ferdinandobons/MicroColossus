@@ -2,17 +2,21 @@
 
 Snapshot date: **2026-07-29**.
 
-This file describes the repository before the handoff documentation is merged.
+This file describes the repository after stabilization and before accepted M6C
+runtime work.
 
 ## 1. Repository
 
 ```text
 repository:     ferdinandobons/MicroColossus
 default branch: main
-visibility:     private
+visibility:     public
 ```
 
 The authenticated owner has administrative and push access.
+
+The repository was made public on 2026-07-29 to unblock GitHub Actions while
+the billing/spending-limit queue was preventing CI from starting.
 
 ## 2. Accepted source baseline
 
@@ -212,7 +216,8 @@ MPS, APFS, physical-memory, or performance behavior.
 
 After publishing the stabilization branch, PR `#29`, PR `#31`, and PR `#33`
 were closed as abandoned M6C transfer or draft experiments. Issue `#27` remains
-open. The only open pull request is stabilization PR `#35`.
+open. At that point, stabilization PR `#35` was the remaining PR; it was later
+merged as described below.
 
 After the repository was made public, the failed GitHub Actions run was rerun
 successfully:
@@ -225,8 +230,40 @@ Python 3.13 job:    PASS, 13m34s
 
 This completes the restored CI matrix for stabilization PR `#35`. The skipped
 `Apply clean M6C patch once` check came from the obsolete `pull_request_target`
-workflow still present on `main` before this stabilization PR is merged; the PR
-removes that workflow from the product branch.
+workflow that was still present on `main` before the stabilization PR was
+merged; that PR removed the workflow from the product branch.
+
+### 6.2 Stabilization accepted on `main`
+
+Stabilization PR `#35` was marked ready and merged into `main` after CI passed.
+
+```text
+merge commit:          67b4eb25c3f74cdd142fb5802db57bcb57b72f19
+merged pull request:   #35
+package version:       0.12.0
+workflow files:        .github/workflows/ci.yml
+open pull requests:    none
+open M6C issue:        #27
+```
+
+The post-merge `main` CI run passed:
+
+```text
+GitHub Actions run: 30450230394
+Python 3.11 job:    PASS
+Python 3.13 job:    PASS
+```
+
+Local final checks after fast-forwarding `main`:
+
+```text
+git status --short --branch: ## main...origin/main
+git diff --check:            PASS
+```
+
+This completes repository stabilization as **Implemented and accepted in CPU CI
+only**. It does not validate Apple M2, MPS, APFS, physical-memory behavior,
+hybrid activation anchors, or larger-than-memory execution.
 
 ## 7. Safe starting points
 

@@ -31,6 +31,7 @@ BOUNDED_TRAINING_SCHEMA_VERSION = "microcolossus.bounded-training.v3"
 TRAINING_METADATA_SCHEMA_VERSION = "microcolossus.training-metadata.v2"
 MULTI_STEP_RUNTIME_VERSION = "0.10.0"
 ACTIVATION_RECOMPUTE_RUNTIME_VERSION = "0.12.0"
+HYBRID_ACTIVATION_RUNTIME_VERSION = "0.13.0"
 BATCH_STREAM_VERSION = "configured-data-source-v1"
 SCHEDULE_KIND = "constant"
 
@@ -129,6 +130,10 @@ def _semantic_config(config: ExperimentConfig) -> dict[str, Any]:
     }
     if config.training.activation_policy != "retain_all":
         training["activation_policy"] = config.training.activation_policy
+    if config.training.activation_policy == "hybrid":
+        training["activation_anchor_policy"] = asdict(
+            config.training.activation_anchor_policy
+        )
     return {
         "model": asdict(config.model),
         "training": training,
@@ -153,11 +158,12 @@ def _metadata_for(
     config: ExperimentConfig,
     data_source: PreparedDataSource,
 ) -> TrainingMetadata:
-    runtime_version = (
-        ACTIVATION_RECOMPUTE_RUNTIME_VERSION
-        if config.training.activation_policy == "recompute"
-        else MULTI_STEP_RUNTIME_VERSION
-    )
+    if config.training.activation_policy == "recompute":
+        runtime_version = ACTIVATION_RECOMPUTE_RUNTIME_VERSION
+    elif config.training.activation_policy == "hybrid":
+        runtime_version = HYBRID_ACTIVATION_RUNTIME_VERSION
+    else:
+        runtime_version = MULTI_STEP_RUNTIME_VERSION
     return TrainingMetadata(
         schema_version=TRAINING_METADATA_SCHEMA_VERSION,
         config_digest=config_digest(config),

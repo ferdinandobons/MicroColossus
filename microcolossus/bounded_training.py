@@ -186,6 +186,11 @@ def run_bounded_training(
 
     if target_step < 0:
         raise ValueError("target_step cannot be negative")
+    if config.training.activation_policy == "hybrid":
+        raise NotImplementedError(
+            "hybrid activation-anchor training is not integrated yet; "
+            "use the activation planner CLI to build and validate a plan first"
+        )
     for value, name in (
         (parameter_working_set_bytes, "parameter_working_set_bytes"),
         (gradient_working_set_bytes, "gradient_working_set_bytes"),

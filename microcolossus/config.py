@@ -66,6 +66,29 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class ActivationAnchorPolicyConfig:
+    """Configuration for a measured hybrid activation-anchor plan."""
+
+    kind: str = "measured_budget_v1"
+    fixed_interval: int = 2
+    max_replay_depth: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind != "measured_budget_v1":
+            raise ValueError("only measured_budget_v1 activation anchors are implemented")
+        _positive(self.fixed_interval, "activation_anchor_policy.fixed_interval")
+        if self.max_replay_depth is not None:
+            if self.max_replay_depth < 0:
+                raise ValueError(
+                    "activation_anchor_policy.max_replay_depth cannot be negative"
+                )
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> ActivationAnchorPolicyConfig:
+        return cls(**dict(values))
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     """Configuration for resident and bounded full-parameter training."""
 
@@ -79,6 +102,9 @@ class TrainingConfig:
     device: str = "auto"
     mode: str = "reference"
     activation_policy: str = "retain_all"
+    activation_anchor_policy: ActivationAnchorPolicyConfig = field(
+        default_factory=ActivationAnchorPolicyConfig
+    )
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -96,14 +122,24 @@ class TrainingConfig:
             raise ValueError("device must be one of: auto, cpu, cuda, mps")
         if self.mode != "reference":
             raise ValueError("only reference mode is implemented")
-        if self.activation_policy not in {"retain_all", "recompute"}:
+        if self.activation_policy not in {"retain_all", "recompute", "hybrid"}:
             raise ValueError(
-                "training.activation_policy must be one of: retain_all, recompute"
+                "training.activation_policy must be one of: retain_all, recompute, hybrid"
             )
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> TrainingConfig:
-        return cls(**dict(values))
+        normalized = dict(values)
+        anchor_policy = normalized.get("activation_anchor_policy", {})
+        if isinstance(anchor_policy, ActivationAnchorPolicyConfig):
+            normalized["activation_anchor_policy"] = anchor_policy
+        else:
+            normalized["activation_anchor_policy"] = (
+                ActivationAnchorPolicyConfig.from_mapping(
+                    _mapping(anchor_policy, "training.activation_anchor_policy")
+                )
+            )
+        return cls(**normalized)
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,12 @@ This roadmap is ordered by dependency. A successor should not skip directly to a
 
 ## Phase 0. Stabilize the repository
 
-Status: **not completed**.
+Status: **Implemented and accepted in CPU CI only**.
+
+Stabilization PR `#35` was merged into `main` at
+`67b4eb25c3f74cdd142fb5802db57bcb57b72f19`. Normal Python 3.11 and 3.13 CI
+passed on `main`, the temporary one-shot M6C workflow was removed, and the
+package remained `0.12.0`.
 
 ### Required actions
 
@@ -36,7 +41,13 @@ Do not request another Mac execution before this phase passes.
 
 ## Phase 1. Reimplement M6C cleanly
 
-Status: **specified, failed draft exists, accepted implementation absent**.
+Status: **profile and planner implemented but not accepted**.
+
+The first clean M6C increment adds checksummed profile and plan generation,
+public APIs, a `microcolossus-activation-plan` CLI, a hybrid example config,
+and CPU tests. It does not yet integrate nearest-anchor backward execution,
+persistent root plan identity, resume, pruning, failure injection, or Apple M2
+validation.
 
 Issue `#27` is the requirements document.
 

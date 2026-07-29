@@ -489,7 +489,7 @@ It does not establish activation storage or offload, asynchronous overlap, direc
 | M5. Deterministic small real-corpus frontend | Completed and validated on M2 |
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
 | M6B. Persistent activation recomputation and strict budgets | Completed and validated on M2 |
-| M6C. Measured hybrid activation-anchor planner | Open in issue #27 |
+| M6C. Measured hybrid activation-anchor planner | Profile and planner implemented but not accepted |
 | Asynchronous prefetch and writeback | Not started |
 | Intra-layer tiling | Not started |
 | Bounded MLX backward and optimizer execution | Not started |
@@ -499,7 +499,7 @@ It does not establish activation storage or offload, asynchronous overlap, direc
 
 The accepted evidence does not establish:
 
-- hybrid activation anchors;
+- hybrid nearest-anchor backward execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict total physical-memory-pressure enforcement;
@@ -519,6 +519,16 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 ## 15. Next engineering gate
 
 The next implementation gate is M6C, a measured hybrid activation-anchor planner.
+
+The clean profile/planner increment is **Implemented but not accepted**. It
+adds deterministic activation measurement profiles, canonical profile and plan
+checksums, retain-all, recompute, fixed-interval, and measured-budget schedule
+summaries, public APIs, `microcolossus-activation-plan`, and
+`examples/real-text-micro-hybrid.yaml`.
+
+Local CPU validation for that increment passed Ruff, mypy over 43 source files,
+pytest with 127 passed and 1 skipped, compileall, doctor, and an updated CPU
+smoke. GitHub CI and Apple M2 target validation are still pending for M6C.
 
 The planner must use the accepted M2 observations rather than an arbitrary checkpoint interval. It should search for a Pareto improvement across:
 

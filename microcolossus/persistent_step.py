@@ -196,7 +196,7 @@ def advance_one_step(
         resident_gradient_norm = recomputed.resident_gradient_norm
         bounded_gradient_norm = recomputed.recomputed_gradient_norm
         clipping_coefficient = recomputed.future_clip_coefficient
-    else:
+    elif config.training.activation_policy == "retain_all":
         retained = run_bounded_backward_from_store(
             config,
             parameter_store=parameter_store,
@@ -238,6 +238,11 @@ def advance_one_step(
         resident_gradient_norm = retained.resident_gradient_norm
         bounded_gradient_norm = retained.bounded_gradient_norm
         clipping_coefficient = retained.future_clip_coefficient
+    else:
+        raise NotImplementedError(
+            f"activation policy is not integrated into persistent training: "
+            f"{config.training.activation_policy}"
+        )
 
     gradient_store = VersionedTensorStore.open(gradient_store_path)
     resident_loss, _ = _resident_oracle_from_current_state(

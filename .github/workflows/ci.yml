@@ -62,12 +62,19 @@ jobs:
         run: |
           microcolossus doctor
           microcolossus bounded-step --help
+          microcolossus-activation-plan --help
           microcolossus-activation-recompute --help
           microcolossus-bounded-train --help
           microcolossus-prune --help
           microcolossus plan --config examples/tiny-mps.yaml
           microcolossus plan --config examples/real-text-micro.yaml
           microcolossus plan --config examples/real-text-micro-recompute.yaml
+          microcolossus-activation-plan \
+            --config examples/real-text-micro-hybrid.yaml \
+            --profile-output /tmp/microcolossus-hybrid-profile.json \
+            --plan-output /tmp/microcolossus-hybrid-plan.json \
+            --activation-working-set-mib 0.02 \
+            --workspace-working-set-mib 4
           microcolossus train --config examples/tiny-resident.yaml --steps 1 --device cpu
           microcolossus train --config examples/real-text-micro.yaml --steps 2 --device cpu
           microcolossus benchmark \

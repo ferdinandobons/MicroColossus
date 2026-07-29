@@ -17,7 +17,12 @@ M6B therefore introduces an explicit activation policy. The first optimized poli
 ```text
 retain_all
 recompute
+hybrid
 ```
+
+`hybrid` is currently accepted by configuration and by the planning CLI only.
+Persistent hybrid backward execution is not integrated yet, and
+`microcolossus-bounded-train` rejects it before creating a training root.
 
 ### `retain_all`
 
@@ -53,6 +58,51 @@ embedding backward
 ```
 
 The first algorithm deliberately favors correctness and observability over throughput. Prefix replay is quadratic in group count. Later hybrid policies can retain selected anchors to reduce replay depth.
+
+### `hybrid`
+
+The M6C planning layer introduces a checksummed measured-budget anchor plan:
+
+```yaml
+training:
+  activation_policy: hybrid
+  activation_anchor_policy:
+    kind: measured_budget_v1
+    fixed_interval: 2
+```
+
+The first implemented M6C increment is side-effect free. It builds:
+
+- a versioned activation measurement profile;
+- a model and batch-shape signature;
+- per-group parameter, boundary, workspace, and timing fields;
+- retain-all, recompute, fixed-interval, and measured-budget summaries;
+- deterministic replay segments;
+- a canonical plan checksum.
+
+The command writes both JSON artifacts:
+
+```bash
+microcolossus-activation-plan \
+  --config examples/real-text-micro-hybrid.yaml \
+  --profile-output runs/hybrid-profile.json \
+  --plan-output runs/hybrid-plan.json \
+  --activation-working-set-mib 1 \
+  --workspace-working-set-mib 4
+```
+
+The same operation is available through:
+
+```bash
+microcolossus activation-plan \
+  --config examples/real-text-micro-hybrid.yaml \
+  --profile-output runs/hybrid-profile.json \
+  --plan-output runs/hybrid-plan.json
+```
+
+This is **Implemented but not accepted** until nearest-anchor backward,
+persistent plan identity, resume, pruning, failure injection, CPU CI, and Apple
+M2 gates pass.
 
 ## 3. Persistent training
 
@@ -239,7 +289,7 @@ MicroColossus 0.12 establishes persistent multi-step training with either full b
 
 It does not yet establish:
 
-- hybrid activation anchors;
+- hybrid nearest-anchor backward execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - optimal replay scheduling;

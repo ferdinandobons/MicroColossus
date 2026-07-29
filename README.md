@@ -98,6 +98,19 @@ embedding backward
 
 The first recomputation schedule is synchronous and favors correctness and observability over throughput. Prefix replay can be quadratic in group count. A future hybrid policy will retain selected anchors from measured replay and memory curves.
 
+M6C profile and plan generation is available as an implementation increment:
+
+```bash
+microcolossus-activation-plan \
+  --config examples/real-text-micro-hybrid.yaml \
+  --profile-output runs/hybrid-profile.json \
+  --plan-output runs/hybrid-plan.json
+```
+
+This produces checksummed profile and plan JSON for `hybrid` activation policy.
+Persistent nearest-anchor hybrid backward execution is not integrated or
+accepted yet.
+
 Separate logical budgets cover:
 
 - parameters;
@@ -280,7 +293,7 @@ microcolossus-prune apply \
 
 Not yet established:
 
-- hybrid activation anchors;
+- hybrid nearest-anchor backward execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict total physical-memory-pressure enforcement;
