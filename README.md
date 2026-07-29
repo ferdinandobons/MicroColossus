@@ -12,7 +12,10 @@ The primary target is **Apple Silicon, beginning with an 8 GB MacBook Air M2**.
 
 MicroColossus does not yet claim complete out-of-core training or training state larger than unified memory. It has validated recoverable storage-backed state, group-bounded forward and backward, streamed global clipping, group-bounded AdamW, atomic step publication, consecutive optimizer steps, process-level resume, deterministic real-text learning, safe checkpoint pruning, and persistent activation recomputation on the target M2.
 
-Version **0.12.0** adds persistent multi-step activation recomputation. Native Apple M2 validation passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`.
+Version **0.13.0** adds the measured hybrid activation-anchor runtime on top
+of the accepted 0.12.0 recomputation baseline. Native Apple M2 validation for
+0.12.0 passed at commit `4742f8a7f57a46edb075159275fb66c83c78ced7`; 0.13.0 is
+not target-accepted until the M6C Apple M2 gate passes.
 
 ## Why Apple Silicon changes the design
 
@@ -74,11 +77,12 @@ The committed root step is the authoritative next-batch cursor. Configuration pr
 
 ### Activation policies
 
-MicroColossus 0.12 supports:
+MicroColossus supports:
 
 ```text
 training.activation_policy: retain_all
 training.activation_policy: recompute
+training.activation_policy: hybrid
 ```
 
 `retain_all` keeps each non-final forward boundary on CPU until the matching reverse group executes.
@@ -96,9 +100,12 @@ embedding backward
     use token IDs directly
 ```
 
-The first recomputation schedule is synchronous and favors correctness and observability over throughput. Prefix replay can be quadratic in group count. A future hybrid policy will retain selected anchors from measured replay and memory curves.
+The first recomputation schedule is synchronous and favors correctness and
+observability over throughput. Prefix replay can be quadratic in group count.
 
-M6C profile and plan generation is available as an implementation increment:
+`hybrid` uses the M6C measured-budget planner to retain selected forward
+anchors, then reconstructs each backward input from its nearest retained
+preceding anchor:
 
 ```bash
 microcolossus-activation-plan \
@@ -107,9 +114,9 @@ microcolossus-activation-plan \
   --plan-output runs/hybrid-plan.json
 ```
 
-This produces checksummed profile and plan JSON for `hybrid` activation policy.
-Persistent nearest-anchor hybrid backward execution is not integrated or
-accepted yet.
+This produces checksummed profile and plan JSON for `hybrid` activation
+policy. During persistent training, the root also stores hybrid profile and
+plan identity so resume rejects changed anchors, budgets, or plan checksums.
 
 Separate logical budgets cover:
 
@@ -130,7 +137,10 @@ retain_all: 444,071,936 bytes
 recompute:  533,528,576 bytes
 ```
 
-This is a deliberate result, not a hidden failure. The logical zero-boundary contract passed, while the current synchronous schedule did not reduce measured physical RSS for that workload. The next milestone therefore uses a measured hybrid anchor planner rather than assuming that maximal recomputation is optimal.
+This is a deliberate result, not a hidden failure. The logical zero-boundary
+contract passed, while the synchronous schedule did not reduce measured
+physical RSS for that workload. M6C therefore uses a measured hybrid anchor
+planner rather than assuming that maximal recomputation is optimal.
 
 ### Deterministic real-text frontend
 
@@ -293,7 +303,7 @@ microcolossus-prune apply \
 
 Not yet established:
 
-- hybrid nearest-anchor backward execution;
+- Apple M2 accepted hybrid nearest-anchor execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict total physical-memory-pressure enforcement;

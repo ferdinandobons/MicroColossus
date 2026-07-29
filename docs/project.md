@@ -272,7 +272,7 @@ The accepted M2/APFS gate reclaimed `10,739,392` bytes in the micro scenario and
 
 ## 13. Activation policies
 
-Version 0.12 supports persistent training with:
+Persistent training supports:
 
 ```yaml
 training:
@@ -284,6 +284,13 @@ or:
 ```yaml
 training:
   activation_policy: recompute
+```
+
+or:
+
+```yaml
+training:
+  activation_policy: hybrid
 ```
 
 ### 13.1 `retain_all`
@@ -322,15 +329,18 @@ training:
     kind: measured_budget_v1
 ```
 
-The implemented planning increment builds deterministic, checksummed activation
+The implemented M6C increment builds deterministic, checksummed activation
 profiles and plans. It compares `retain_all`, full-prefix `recompute`,
 fixed-interval anchors, and measured-budget anchor schedules, then records
 selected anchors, replay segments, retained bytes, replayed groups, parameter
 rereads, workspace status, and feasibility.
 
-Persistent nearest-anchor hybrid backward execution is not integrated yet.
-`microcolossus-bounded-train` rejects `hybrid` before initializing a training
-root.
+Persistent nearest-anchor hybrid backward execution is integrated into
+`microcolossus-bounded-train`. The forward path retains only plan-selected
+anchors; backward reconstructs each target input from the nearest retained
+preceding anchor and replays only intervening groups. Hybrid roots bind profile
+checksum, plan checksum, planner version, selected anchors, activation budget,
+workspace budget, and replay-depth constraint.
 
 ## 14. Budget model
 
@@ -487,7 +497,7 @@ Zero forward-boundary retention is a logical property. A useful policy must also
 
 MicroColossus does not yet establish:
 
-- hybrid nearest-anchor backward execution;
+- Apple M2 accepted hybrid nearest-anchor execution;
 - activation tensors stored on disk;
 - asynchronous activation prefetch or writeback;
 - strict enforcement of total physical memory pressure;
@@ -512,7 +522,7 @@ No complete out-of-core, production-quality, throughput-at-scale, or model-capac
 | M0 through M5. Resident, storage, bounded execution, resume, and real text | Completed and validated on M2 |
 | M6A. Historical-state pruning and compaction | Completed and validated on M2/APFS |
 | M6B. Persistent activation recomputation and strict activation/workspace budgets | Completed and validated on M2 |
-| M6C. Measured hybrid activation-anchor planner | Profile and planner implemented, runtime not accepted |
+| M6C. Measured hybrid activation-anchor planner | Runtime implemented, not Apple M2 accepted |
 | M7. Asynchronous prefetch and writeback | Planned |
 | M8. Intra-layer tiling | Planned |
 | M9. Bounded MLX backward and optimizer execution | Planned |

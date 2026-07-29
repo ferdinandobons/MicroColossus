@@ -1,23 +1,30 @@
-"""Synchronous activation-recomputation reference for bounded backward execution.
-
-The established bounded backward path retains every forward boundary on CPU.
-This module provides the first M6B reference path: the forward retains no
-boundary activation, and each reverse group deterministically replays the
-prefix required to reconstruct its local input.
-"""
+"""Nearest-anchor hybrid backward execution from an authoritative parameter store."""
 
 from __future__ import annotations
 
 import gc
 import time
-from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from .activation_planner import (
+    ACTIVATION_PLANNER_VERSION,
+    ActivationMeasurementProfile,
+    ActivationPlan,
+    ActivationPlanIntegrityError,
+)
+from .activation_recompute import (
+    ActivationBackwardGroupMetrics,
+    ActivationForwardGroupMetrics,
+    ActivationRecomputeResult,
+    PrefixReplayMetrics,
+    _check_activation,
+    _check_workspace,
+    _clone_limits,
+)
 from .bounded_backward import (
     GradientWorkingSetExceededError,
     _batch_checksum,
@@ -41,194 +48,87 @@ from .bounded_forward import (
     _read_group,
     _record_map,
     _release_accelerator,
-    _store_limits,
     build_execution_groups,
     tensor_checksum,
 )
 from .config import ExperimentConfig
 from .model import DecoderOnlyTransformer
-from .storage import StoreLimits, VersionedTensorStore
-from .storage.adapters import export_pytorch_model
-from .storage.schema import StoreTelemetry, TensorRecord
-from .storage_training import StateComparison, compare_states
+from .storage import VersionedTensorStore
+from .storage.schema import TensorRecord
+from .storage_training import compare_states
 from .telemetry import (
-    AcceleratorMemoryMetrics,
     accelerator_memory_metrics,
     process_rss_bytes,
     synchronize_accelerator,
     write_json_atomic,
 )
-from .training import make_synthetic_lm_batch, resolve_device, seed_everything
+from .training_checkpoint import _parameter_payloads
 
-ACTIVATION_RECOMPUTE_SCHEMA_VERSION = "microcolossus.activation-recompute.v1"
-
-
-class ActivationWorkingSetExceededError(RuntimeError):
-    """Raised when a retained activation working set exceeds its budget."""
+ACTIVATION_HYBRID_SCHEMA_VERSION = "microcolossus.activation-hybrid.v1"
 
 
-class WorkspaceWorkingSetExceededError(RuntimeError):
-    """Raised when a local recomputation workspace exceeds its budget."""
-
-
-@dataclass(frozen=True)
-class ActivationForwardGroupMetrics:
-    ordinal: int
-    name: str
-    tensor_names: tuple[str, ...]
-    tensor_count: int
-    logical_parameter_bytes: int
-    referenced_chunk_reads: int
-    parameter_read_seconds: float
-    materialization_seconds: float
-    compute_seconds: float
-    release_seconds: float
-    input_activation_bytes: int
-    output_activation_bytes: int
-    logical_workspace_bytes: int
-    output_checksum: str
-    retained_after_group: bool
-    process_rss_after_compute_bytes: int
-    accelerator_after_compute: AcceleratorMemoryMetrics
-
-
-@dataclass(frozen=True)
-class PrefixReplayMetrics:
-    target_group: str
-    replayed_group_names: tuple[str, ...]
-    parameter_tensor_reads: int
-    parameter_chunk_reads: int
-    parameter_logical_bytes_read: int
-    parameter_read_seconds: float
-    materialization_seconds: float
-    compute_seconds: float
-    release_seconds: float
-    maximum_workspace_bytes: int
-    output_activation_bytes: int
-    output_checksum: str
-
-
-@dataclass(frozen=True)
-class ActivationBackwardGroupMetrics:
-    ordinal: int
-    name: str
-    tensor_names: tuple[str, ...]
-    prefix_replay: PrefixReplayMetrics | None
-    logical_parameter_bytes: int
-    referenced_chunk_reads: int
-    input_activation_bytes: int
-    output_activation_bytes: int
-    incoming_activation_gradient_bytes: int
-    outgoing_activation_gradient_bytes: int
-    logical_workspace_bytes: int
-    parameter_read_seconds: float
-    materialization_seconds: float
-    local_forward_seconds: float
-    backward_seconds: float
-    gradient_extraction_seconds: float
-    gradient_commit_seconds: float
-    release_seconds: float
-    gradient_logical_bytes_written: int
-    gradient_physical_bytes_written: int
-    gradient_chunk_writes: int
-    gradient_chunks_reused: int
-    local_gradient_checksum: str
-    upstream_gradient_checksum: str | None
-    process_rss_after_backward_bytes: int
-    accelerator_after_backward: AcceleratorMemoryMetrics
-    accelerator_after_release: AcceleratorMemoryMetrics
-
-
-@dataclass(frozen=True)
-class ActivationRecomputeResult:
-    schema_version: str
-    experiment: str
-    device: str
-    activation_policy: str
-    parameter_store_path: str
-    oracle_gradient_store_path: str
-    gradient_store_path: str
-    parameter_manifest_id: str
-    parameter_manifest_checksum: str
-    oracle_gradient_manifest_id: str
-    gradient_manifest_id: str
-    oracle_gradient_store_commit: StoreTelemetry
-    parameter_count: int
-    batch_checksum: str
-    parameter_working_set_budget_bytes: int
-    gradient_working_set_budget_bytes: int
-    activation_working_set_budget_bytes: int
-    workspace_working_set_budget_bytes: int
-    maximum_parameter_group_bytes: int
-    maximum_gradient_group_bytes: int
-    maximum_retained_activation_bytes: int
-    maximum_workspace_bytes: int
-    parameter_budget_respected: bool
-    gradient_budget_respected: bool
-    activation_budget_respected: bool
-    workspace_budget_respected: bool
-    retained_forward_boundary_count: int
-    retained_forward_boundary_bytes: int
-    forward_groups: tuple[ActivationForwardGroupMetrics, ...]
-    backward_groups: tuple[ActivationBackwardGroupMetrics, ...]
-    backward_group_order: tuple[str, ...]
-    total_prefix_replayed_groups: int
-    total_prefix_parameter_tensor_reads: int
-    total_prefix_parameter_chunk_reads: int
-    total_prefix_parameter_logical_bytes_read: int
-    total_prefix_recomputation_seconds: float
-    resident_loss: float
-    recomputed_loss: float
-    loss_absolute_difference: float
-    resident_gradient_norm: float
-    oracle_store_gradient_norm: float
-    oracle_store_norm_absolute_difference: float
-    recomputed_gradient_norm: float
-    gradient_norm_absolute_difference: float
-    future_clip_coefficient: float
-    gradient_tensor_count: int
-    tied_gradient_accumulation_count: int
-    tied_gradient_version: int
-    resident_vs_recomputed_gradients: StateComparison
-    parameter_manifest_unchanged: bool
-    parameter_store_verified_tensor_count: int
-    oracle_gradient_store_verified_tensor_count: int
-    recomputed_gradient_store_verified_tensor_count: int
-    activation_profile_checksum: str | None = None
-    activation_plan_checksum: str | None = None
-    activation_planner_version: str | None = None
-    selected_anchor_group_names: tuple[str, ...] = ()
-    full_gradient_state_materialized_for_validation: bool = True
-    resident_oracle_materialized_for_validation: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-def _clone_limits(store: VersionedTensorStore) -> StoreLimits:
-    return StoreLimits(
-        chunk_size_bytes=store.limits.chunk_size_bytes,
-        max_storage_bytes=store.limits.max_storage_bytes,
-        max_staging_bytes=store.limits.max_staging_bytes,
-    )
-
-
-def _check_workspace(required: int, budget: int, context: str) -> None:
-    if required > budget:
-        raise WorkspaceWorkingSetExceededError(
-            f"{context} requires {required} workspace bytes but the budget is {budget} bytes"
+def _validate_hybrid_plan(
+    profile: ActivationMeasurementProfile,
+    plan: ActivationPlan,
+    groups: tuple[ExecutionGroupSpec, ...],
+    *,
+    activation_working_set_bytes: int,
+    workspace_working_set_bytes: int,
+) -> None:
+    plan.validate(profile)
+    if not plan.feasible:
+        raise ActivationPlanIntegrityError(
+            f"hybrid activation plan is infeasible: {plan.rejection_reason}"
         )
-
-
-def _check_activation(required: int, budget: int, context: str) -> None:
-    if required > budget:
-        raise ActivationWorkingSetExceededError(
-            f"{context} requires {required} retained activation bytes but the budget is "
-            f"{budget} bytes"
+    if plan.selected_policy != "measured_budget_v1":
+        raise ActivationPlanIntegrityError(
+            f"unsupported selected activation policy: {plan.selected_policy}"
         )
+    if plan.planner_version != ACTIVATION_PLANNER_VERSION:
+        raise ActivationPlanIntegrityError(
+            f"unsupported activation planner: {plan.planner_version}"
+        )
+    if plan.activation_budget_bytes != activation_working_set_bytes:
+        raise ActivationPlanIntegrityError("activation budget does not match plan")
+    if plan.workspace_budget_bytes != workspace_working_set_bytes:
+        raise ActivationPlanIntegrityError("workspace budget does not match plan")
+    group_names = tuple(item.name for item in groups)
+    profile_names = tuple(item.name for item in profile.groups)
+    if group_names != profile_names:
+        raise ActivationPlanIntegrityError("profile group order does not match runtime")
+    anchor_names = set(plan.selected_anchor_group_names)
+    if "final-head" in anchor_names:
+        raise ActivationPlanIntegrityError("final-head cannot be a hybrid anchor")
+    for name in anchor_names:
+        if name not in group_names:
+            raise ActivationPlanIntegrityError(f"unknown hybrid anchor: {name}")
+        if group_names.index(name) >= len(group_names) - 1:
+            raise ActivationPlanIntegrityError(f"group cannot be a hybrid anchor: {name}")
 
 
-def _forward_without_retained_boundaries(
+def _segment_replay_names(
+    groups: tuple[ExecutionGroupSpec, ...],
+    *,
+    target: ExecutionGroupSpec,
+    anchor_group: str | None,
+) -> tuple[str, ...]:
+    if target.ordinal <= 0:
+        return ()
+    if anchor_group is None:
+        start = 0
+    else:
+        anchor_ordinal = next(
+            item.ordinal for item in groups if item.name == anchor_group
+        )
+        if anchor_ordinal >= target.ordinal:
+            raise ActivationPlanIntegrityError(
+                f"anchor {anchor_group} does not precede target {target.name}"
+            )
+        start = anchor_ordinal + 1
+    return tuple(item.name for item in groups[start : target.ordinal])
+
+
+def _forward_with_hybrid_anchors(
     config: ExperimentConfig,
     store: VersionedTensorStore,
     manifest_id: str,
@@ -238,13 +138,20 @@ def _forward_without_retained_boundaries(
     targets: Tensor,
     device: torch.device,
     *,
+    anchor_names: set[str],
     parameter_working_set_bytes: int,
+    activation_working_set_bytes: int,
     workspace_working_set_bytes: int,
-) -> tuple[float, tuple[ActivationForwardGroupMetrics, ...], int]:
-    """Execute a group forward while retaining no later-backward boundary."""
-
+) -> tuple[
+    float,
+    tuple[ActivationForwardGroupMetrics, ...],
+    dict[str, Tensor],
+    int,
+    int,
+]:
     hidden_states: Tensor | None = None
     metrics: list[ActivationForwardGroupMetrics] = []
+    anchors: dict[str, Tensor] = {}
     bounded_loss: float | None = None
     maximum_workspace = 0
 
@@ -291,16 +198,27 @@ def _forward_without_retained_boundaries(
             _check_workspace(
                 workspace_bytes,
                 workspace_working_set_bytes,
-                f"forward group {spec.name}",
+                f"hybrid forward group {spec.name}",
             )
             maximum_workspace = max(maximum_workspace, workspace_bytes)
             output_cpu = output.detach().cpu().contiguous()
             output_checksum = tensor_checksum(output_cpu)
+            retained_after_group = spec.name in anchor_names
+            if retained_after_group:
+                anchors[spec.name] = output_cpu
+                retained_bytes = sum(_activation_bytes(value) for value in anchors.values())
+                _check_activation(
+                    retained_bytes,
+                    activation_working_set_bytes,
+                    "retained hybrid anchors during forward",
+                )
             memory = accelerator_memory_metrics(device)
             process_rss = process_rss_bytes()
 
             release_started = time.perf_counter()
-            del tensors, output_cpu
+            del tensors
+            if not retained_after_group:
+                del output_cpu
             if spec.name == "final-head":
                 previous_hidden = hidden_states
                 hidden_states = None
@@ -331,25 +249,35 @@ def _forward_without_retained_boundaries(
                     output_activation_bytes=output_activation_bytes,
                     logical_workspace_bytes=workspace_bytes,
                     output_checksum=output_checksum,
-                    retained_after_group=False,
+                    retained_after_group=retained_after_group,
                     process_rss_after_compute_bytes=process_rss,
                     accelerator_after_compute=memory,
                 )
             )
 
     if bounded_loss is None:
-        raise RuntimeError("activation-recompute forward did not produce a loss")
+        raise RuntimeError("hybrid forward did not produce a loss")
+    retained_anchor_bytes = sum(_activation_bytes(value) for value in anchors.values())
     _release_accelerator(device)
-    return bounded_loss, tuple(metrics), maximum_workspace
+    return (
+        bounded_loss,
+        tuple(metrics),
+        anchors,
+        retained_anchor_bytes,
+        maximum_workspace,
+    )
 
 
-def _recompute_group_input(
+def _hybrid_group_input(
     config: ExperimentConfig,
     store: VersionedTensorStore,
     manifest_id: str,
     records: dict[str, TensorRecord],
     groups: tuple[ExecutionGroupSpec, ...],
     target: ExecutionGroupSpec,
+    segment_anchor: str | None,
+    segment_replayed: tuple[str, ...],
+    anchors: dict[str, Tensor],
     input_ids: Tensor,
     device: torch.device,
     *,
@@ -357,12 +285,48 @@ def _recompute_group_input(
     activation_working_set_bytes: int,
     workspace_working_set_bytes: int,
 ) -> tuple[Tensor, PrefixReplayMetrics]:
-    """Replay the deterministic prefix required to reconstruct one group input."""
-
     if target.ordinal <= 0:
         raise ValueError("embedding does not consume a hidden activation")
-    hidden_states: Tensor | None = None
-    replayed_names: list[str] = []
+    expected_replay = _segment_replay_names(
+        groups,
+        target=target,
+        anchor_group=segment_anchor,
+    )
+    if expected_replay != segment_replayed:
+        raise ActivationPlanIntegrityError(
+            f"plan replay segment for {target.name} does not match runtime group order"
+        )
+    if segment_anchor is not None and not segment_replayed:
+        anchor_cpu = anchors[segment_anchor].detach().cpu().contiguous()
+        output_activation_bytes = _activation_bytes(anchor_cpu)
+        _check_activation(
+            output_activation_bytes,
+            activation_working_set_bytes,
+            f"hybrid anchor input for {target.name}",
+        )
+        return anchor_cpu, PrefixReplayMetrics(
+            target_group=target.name,
+            replayed_group_names=(),
+            parameter_tensor_reads=0,
+            parameter_chunk_reads=0,
+            parameter_logical_bytes_read=0,
+            parameter_read_seconds=0.0,
+            materialization_seconds=0.0,
+            compute_seconds=0.0,
+            release_seconds=0.0,
+            maximum_workspace_bytes=output_activation_bytes,
+            output_activation_bytes=output_activation_bytes,
+            output_checksum=tensor_checksum(anchor_cpu),
+        )
+
+    hidden_states: Tensor | None
+    if segment_anchor is None:
+        hidden_states = None
+    else:
+        if segment_anchor not in anchors:
+            raise ActivationPlanIntegrityError(f"missing retained anchor: {segment_anchor}")
+        hidden_states = anchors[segment_anchor].to(device)
+
     tensor_reads = 0
     chunk_reads = 0
     logical_bytes_read = 0
@@ -371,9 +335,11 @@ def _recompute_group_input(
     compute_seconds_total = 0.0
     release_seconds_total = 0.0
     maximum_workspace = 0
+    group_by_name = {item.name: item for item in groups}
 
     with torch.no_grad():
-        for spec in groups[: target.ordinal]:
+        for group_name in segment_replayed:
+            spec = group_by_name[group_name]
             input_activation_bytes = (
                 _activation_bytes(input_ids)
                 if hidden_states is None
@@ -384,14 +350,16 @@ def _recompute_group_input(
             )
             if logical_bytes > parameter_working_set_bytes:
                 raise WorkingSetExceededError(
-                    f"replayed group {spec.name} requires {logical_bytes} parameter bytes"
+                    f"hybrid replay group {spec.name} requires {logical_bytes} parameter bytes"
                 )
             compute_started = time.perf_counter()
             if spec.name == "embedding":
+                if hidden_states is not None:
+                    raise RuntimeError("embedding replay cannot start from an anchor")
                 output = _embedding_forward(input_ids, tensors, device)
             elif spec.name.startswith("block-"):
                 if hidden_states is None:
-                    raise RuntimeError("replayed block executed before embeddings")
+                    raise RuntimeError("hybrid replay block executed before embeddings")
                 output = _block_forward(
                     hidden_states,
                     tensors,
@@ -399,7 +367,7 @@ def _recompute_group_input(
                     int(spec.name.split("-", maxsplit=1)[1]),
                 )
             else:
-                raise RuntimeError("final head cannot be part of a prefix replay")
+                raise RuntimeError("final head cannot be part of hybrid replay")
             synchronize_accelerator(device)
             compute_seconds = time.perf_counter() - compute_started
             output_activation_bytes = _activation_bytes(output)
@@ -407,7 +375,7 @@ def _recompute_group_input(
             _check_workspace(
                 workspace_bytes,
                 workspace_working_set_bytes,
-                f"prefix replay group {spec.name}",
+                f"hybrid replay group {spec.name}",
             )
             maximum_workspace = max(maximum_workspace, workspace_bytes)
 
@@ -421,7 +389,6 @@ def _recompute_group_input(
             synchronize_accelerator(device)
             release_seconds_total += time.perf_counter() - release_started
 
-            replayed_names.append(spec.name)
             tensor_reads += len(spec.tensor_names)
             chunk_reads += chunks
             logical_bytes_read += logical_bytes
@@ -430,20 +397,20 @@ def _recompute_group_input(
             compute_seconds_total += compute_seconds
 
     if hidden_states is None:
-        raise RuntimeError(f"prefix replay for {target.name} produced no activation")
+        raise RuntimeError(f"hybrid replay for {target.name} produced no activation")
     output_cpu = hidden_states.detach().cpu().contiguous()
     output_activation_bytes = _activation_bytes(output_cpu)
     _check_activation(
         output_activation_bytes,
         activation_working_set_bytes,
-        f"recomputed input for {target.name}",
+        f"hybrid replay input for {target.name}",
     )
     checksum = tensor_checksum(output_cpu)
     del hidden_states
     _release_accelerator(device)
     return output_cpu, PrefixReplayMetrics(
         target_group=target.name,
-        replayed_group_names=tuple(replayed_names),
+        replayed_group_names=segment_replayed,
         parameter_tensor_reads=tensor_reads,
         parameter_chunk_reads=chunk_reads,
         parameter_logical_bytes_read=logical_bytes_read,
@@ -457,23 +424,27 @@ def _recompute_group_input(
     )
 
 
-def run_activation_recompute_validation(
+def run_activation_hybrid_from_store(
     config: ExperimentConfig,
     *,
-    parameter_store_path: str | Path,
-    oracle_gradient_store_path: str | Path,
-    gradient_store_path: str | Path,
-    output_path: str | Path | None = None,
-    device_override: str | None = None,
-    parameter_working_set_bytes: int = 1024**2,
-    gradient_working_set_bytes: int = 1024**2,
-    activation_working_set_bytes: int = 1024**2,
-    workspace_working_set_bytes: int = 4 * 1024**2,
+    parameter_store: VersionedTensorStore,
+    activation_profile: ActivationMeasurementProfile,
+    activation_plan: ActivationPlan,
+    oracle_gradient_store_path: Path,
+    gradient_store_path: Path,
+    output_path: Path,
+    input_ids: Tensor,
+    targets: Tensor,
+    device: torch.device,
+    parameter_working_set_bytes: int,
+    gradient_working_set_bytes: int,
+    activation_working_set_bytes: int,
+    workspace_working_set_bytes: int,
 ) -> ActivationRecomputeResult:
-    """Validate zero-boundary-retention recomputation against resident gradients."""
+    """Run one hybrid nearest-anchor backward pass from a parameter store."""
 
     if config.model.dropout != 0.0:
-        raise ValueError("activation recomputation currently requires model.dropout=0")
+        raise ValueError("hybrid activation execution currently requires model.dropout=0")
     for value, name in (
         (parameter_working_set_bytes, "parameter_working_set_bytes"),
         (gradient_working_set_bytes, "gradient_working_set_bytes"),
@@ -482,36 +453,22 @@ def run_activation_recompute_validation(
     ):
         if value <= 0:
             raise ValueError(f"{name} must be greater than zero")
+    if oracle_gradient_store_path.exists():
+        raise FileExistsError(f"oracle gradient store exists: {oracle_gradient_store_path}")
+    if gradient_store_path.exists():
+        raise FileExistsError(f"hybrid gradient store exists: {gradient_store_path}")
 
-    parameter_destination = Path(parameter_store_path)
-    oracle_destination = Path(oracle_gradient_store_path)
-    gradient_destination = Path(gradient_store_path)
-    for destination, label in (
-        (parameter_destination, "parameter store"),
-        (oracle_destination, "oracle gradient store"),
-        (gradient_destination, "recomputed gradient store"),
-    ):
-        if destination.exists():
-            raise FileExistsError(f"activation recomputation requires a new {label}: {destination}")
-
-    device = resolve_device(device_override or config.training.device)
-    seed_everything(config.training.seed)
-    bootstrap_model = DecoderOnlyTransformer(config.model)
-    parameter_count = bootstrap_model.parameter_count
-    bootstrap_payloads = export_pytorch_model(bootstrap_model)
-    del bootstrap_model
-    gc.collect()
-
-    parameter_store = VersionedTensorStore.create(
-        parameter_destination,
-        limits=_store_limits(config),
-    )
-    transaction = parameter_store.begin_transaction(committed_step=0)
-    transaction.put_many(bootstrap_payloads)
-    parameter_commit = transaction.commit()
-    parameter_manifest = parameter_commit.manifest
+    parameter_manifest = parameter_store.current_manifest()
     records = _record_map(parameter_manifest.tensors)
     groups = build_execution_groups(config, set(records))
+    _validate_hybrid_plan(
+        activation_profile,
+        activation_plan,
+        groups,
+        activation_working_set_bytes=activation_working_set_bytes,
+        workspace_working_set_bytes=workspace_working_set_bytes,
+    )
+    segment_by_target = {item.target_group: item for item in activation_plan.replay_segments}
     maximum_parameter_group_bytes = max(
         sum(records[name].byte_length for name in group.tensor_names) for group in groups
     )
@@ -529,23 +486,19 @@ def run_activation_recompute_validation(
             f"{gradient_working_set_bytes} bytes"
         )
 
-    generator = torch.Generator(device="cpu").manual_seed(config.training.seed + 1)
-    input_ids, targets = make_synthetic_lm_batch(
-        batch_size=config.training.micro_batch_size,
-        sequence_length=config.training.sequence_length,
-        vocab_size=config.model.vocab_size,
-        generator=generator,
-    )
-    data_checksum = _batch_checksum(input_ids, targets)
+    probe_model = DecoderOnlyTransformer(config.model)
+    parameter_count = probe_model.parameter_count
+    del probe_model
+    resident_payloads = _parameter_payloads(parameter_store)
     resident = _resident_gradient_trace(
         config,
-        bootstrap_payloads,
+        resident_payloads,
         input_ids,
         targets,
         device,
     )
     oracle_store = VersionedTensorStore.create(
-        oracle_destination,
+        oracle_gradient_store_path,
         limits=_clone_limits(parameter_store),
     )
     oracle_transaction = oracle_store.begin_transaction(committed_step=0)
@@ -553,11 +506,11 @@ def run_activation_recompute_validation(
     oracle_commit = oracle_transaction.commit()
     resident_loss = resident.loss
     resident_gradient_norm = resident.gradient_norm
-    del resident, bootstrap_payloads
+    del resident, resident_payloads
     gc.collect()
 
-    recomputed_loss, forward_metrics, forward_workspace = (
-        _forward_without_retained_boundaries(
+    hybrid_loss, forward_metrics, anchor_activations, retained_anchor_bytes, forward_max = (
+        _forward_with_hybrid_anchors(
             config,
             parameter_store,
             parameter_manifest.manifest_id,
@@ -566,48 +519,56 @@ def run_activation_recompute_validation(
             input_ids,
             targets,
             device,
+            anchor_names=set(activation_plan.selected_anchor_group_names),
             parameter_working_set_bytes=parameter_working_set_bytes,
+            activation_working_set_bytes=activation_working_set_bytes,
             workspace_working_set_bytes=workspace_working_set_bytes,
         )
     )
     gradient_store = VersionedTensorStore.create(
-        gradient_destination,
+        gradient_store_path,
         limits=_clone_limits(parameter_store),
     )
 
     upstream: Tensor | None = None
     backward_metrics: list[ActivationBackwardGroupMetrics] = []
     tied_accumulations = 0
-    maximum_retained_activation = 0
-    maximum_workspace = forward_workspace
+    maximum_retained_activation = retained_anchor_bytes
+    maximum_workspace = forward_max
 
     for reverse_ordinal, spec in enumerate(reversed(groups)):
         replay: PrefixReplayMetrics | None = None
         input_cpu: Tensor | None = None
         incoming_gradient_bytes = 0 if upstream is None else _activation_bytes(upstream)
         if spec.name != "embedding":
-            input_cpu, replay = _recompute_group_input(
+            segment = segment_by_target.get(spec.name)
+            if segment is None:
+                raise ActivationPlanIntegrityError(f"missing replay segment for {spec.name}")
+            input_cpu, replay = _hybrid_group_input(
                 config,
                 parameter_store,
                 parameter_manifest.manifest_id,
                 records,
                 groups,
                 spec,
+                segment.anchor_group,
+                segment.replayed_group_names,
+                anchor_activations,
                 input_ids,
                 device,
                 parameter_working_set_bytes=parameter_working_set_bytes,
                 activation_working_set_bytes=activation_working_set_bytes,
                 workspace_working_set_bytes=workspace_working_set_bytes,
             )
-            simultaneous_cpu_bytes = replay.output_activation_bytes + incoming_gradient_bytes
+            retained_before_backward = retained_anchor_bytes + incoming_gradient_bytes
             _check_activation(
-                simultaneous_cpu_bytes,
+                retained_before_backward,
                 activation_working_set_bytes,
-                f"recomputed input and incoming gradient for {spec.name}",
+                f"hybrid retained anchors and incoming gradient for {spec.name}",
             )
             maximum_retained_activation = max(
                 maximum_retained_activation,
-                simultaneous_cpu_bytes,
+                retained_before_backward,
             )
             maximum_workspace = max(maximum_workspace, replay.maximum_workspace_bytes)
 
@@ -627,7 +588,7 @@ def run_activation_recompute_validation(
 
         if spec.name == "final-head":
             if input_cpu is None:
-                raise RuntimeError("final head recomputation requires an input activation")
+                raise RuntimeError("final head hybrid replay requires an input activation")
             local_input = input_cpu.to(device).detach()
             del input_cpu
             local_input.requires_grad_(True)
@@ -643,11 +604,11 @@ def run_activation_recompute_validation(
             loss.backward()
             synchronize_accelerator(device)
             backward_seconds = time.perf_counter() - backward_started
-            recomputed_loss = float(loss.detach().cpu().item())
+            hybrid_loss = float(loss.detach().cpu().item())
             del loss
         elif spec.name.startswith("block-"):
             if input_cpu is None:
-                raise RuntimeError(f"{spec.name} recomputation requires an input activation")
+                raise RuntimeError(f"{spec.name} hybrid replay requires an input activation")
             if upstream is None:
                 raise RuntimeError("block backward requires an upstream gradient")
             local_input = input_cpu.to(device).detach()
@@ -695,14 +656,15 @@ def run_activation_recompute_validation(
             next_upstream = None
             outgoing_gradient_bytes = 0
 
+        retained_after_backward = retained_anchor_bytes + outgoing_gradient_bytes
         _check_activation(
-            outgoing_gradient_bytes,
+            retained_after_backward,
             activation_working_set_bytes,
-            f"outgoing activation gradient for {spec.name}",
+            f"hybrid retained anchors and outgoing gradient for {spec.name}",
         )
         maximum_retained_activation = max(
             maximum_retained_activation,
-            outgoing_gradient_bytes,
+            retained_after_backward,
         )
         local_workspace = (
             input_activation_bytes
@@ -713,7 +675,7 @@ def run_activation_recompute_validation(
         _check_workspace(
             local_workspace,
             workspace_working_set_bytes,
-            f"backward group {spec.name}",
+            f"hybrid backward group {spec.name}",
         )
         maximum_workspace = max(maximum_workspace, local_workspace)
 
@@ -782,10 +744,10 @@ def run_activation_recompute_validation(
         )
 
     oracle_norm = _stream_gradient_norm(oracle_store)
-    recomputed_norm = _stream_gradient_norm(gradient_store)
+    hybrid_norm = _stream_gradient_norm(gradient_store)
     oracle_gradients = _read_all_gradients(oracle_store)
-    recomputed_gradients = _read_all_gradients(gradient_store)
-    comparison = compare_states(oracle_gradients, recomputed_gradients)
+    hybrid_gradients = _read_all_gradients(gradient_store)
+    comparison = compare_states(oracle_gradients, hybrid_gradients)
     gradient_manifest = gradient_store.current_manifest()
     tied_record = _gradient_map(gradient_manifest.tensors)["model.token_embedding.weight"]
     parameter_after = parameter_store.current_manifest()
@@ -794,7 +756,7 @@ def run_activation_recompute_validation(
     gradient_verification = gradient_store.verify()
     max_norm = config.training.gradient_clip_norm
     clip_coefficient = (
-        1.0 if max_norm is None else min(1.0, max_norm / (recomputed_norm + 1e-6))
+        1.0 if max_norm is None else min(1.0, max_norm / (hybrid_norm + 1e-6))
     )
     prefix_metrics = tuple(
         replay
@@ -803,20 +765,20 @@ def run_activation_recompute_validation(
     )
 
     result = ActivationRecomputeResult(
-        schema_version=ACTIVATION_RECOMPUTE_SCHEMA_VERSION,
+        schema_version=ACTIVATION_HYBRID_SCHEMA_VERSION,
         experiment=config.name,
         device=str(device),
-        activation_policy="recompute",
-        parameter_store_path=str(parameter_destination),
-        oracle_gradient_store_path=str(oracle_destination),
-        gradient_store_path=str(gradient_destination),
+        activation_policy="hybrid",
+        parameter_store_path=str(parameter_store.root),
+        oracle_gradient_store_path=str(oracle_gradient_store_path),
+        gradient_store_path=str(gradient_store_path),
         parameter_manifest_id=parameter_manifest.manifest_id,
         parameter_manifest_checksum=parameter_manifest.manifest_checksum,
         oracle_gradient_manifest_id=oracle_commit.manifest.manifest_id,
         gradient_manifest_id=gradient_manifest.manifest_id,
         oracle_gradient_store_commit=oracle_commit.telemetry,
         parameter_count=parameter_count,
-        batch_checksum=data_checksum,
+        batch_checksum=_batch_checksum(input_ids, targets),
         parameter_working_set_budget_bytes=parameter_working_set_bytes,
         gradient_working_set_budget_bytes=gradient_working_set_bytes,
         activation_working_set_budget_bytes=activation_working_set_bytes,
@@ -832,8 +794,8 @@ def run_activation_recompute_validation(
         activation_budget_respected=maximum_retained_activation
         <= activation_working_set_bytes,
         workspace_budget_respected=maximum_workspace <= workspace_working_set_bytes,
-        retained_forward_boundary_count=0,
-        retained_forward_boundary_bytes=0,
+        retained_forward_boundary_count=len(anchor_activations),
+        retained_forward_boundary_bytes=retained_anchor_bytes,
         forward_groups=forward_metrics,
         backward_groups=tuple(backward_metrics),
         backward_group_order=tuple(item.name for item in backward_metrics),
@@ -853,13 +815,13 @@ def run_activation_recompute_validation(
             item.compute_seconds for item in prefix_metrics
         ),
         resident_loss=resident_loss,
-        recomputed_loss=recomputed_loss,
-        loss_absolute_difference=abs(resident_loss - recomputed_loss),
+        recomputed_loss=hybrid_loss,
+        loss_absolute_difference=abs(resident_loss - hybrid_loss),
         resident_gradient_norm=resident_gradient_norm,
         oracle_store_gradient_norm=oracle_norm,
         oracle_store_norm_absolute_difference=abs(resident_gradient_norm - oracle_norm),
-        recomputed_gradient_norm=recomputed_norm,
-        gradient_norm_absolute_difference=abs(resident_gradient_norm - recomputed_norm),
+        recomputed_gradient_norm=hybrid_norm,
+        gradient_norm_absolute_difference=abs(resident_gradient_norm - hybrid_norm),
         future_clip_coefficient=clip_coefficient,
         gradient_tensor_count=len(gradient_manifest.tensors),
         tied_gradient_accumulation_count=tied_accumulations,
@@ -872,9 +834,12 @@ def run_activation_recompute_validation(
         parameter_store_verified_tensor_count=parameter_verification.tensor_count,
         oracle_gradient_store_verified_tensor_count=oracle_verification.tensor_count,
         recomputed_gradient_store_verified_tensor_count=gradient_verification.tensor_count,
+        activation_profile_checksum=activation_profile.profile_checksum,
+        activation_plan_checksum=activation_plan.plan_checksum,
+        activation_planner_version=activation_plan.planner_version,
+        selected_anchor_group_names=activation_plan.selected_anchor_group_names,
     )
-    if output_path is not None:
-        write_json_atomic(output_path, result)
-    del oracle_gradients, recomputed_gradients
+    write_json_atomic(output_path, result)
+    del oracle_gradients, hybrid_gradients, anchor_activations
     _release_accelerator(device)
     return result

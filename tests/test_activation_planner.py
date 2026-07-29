@@ -175,10 +175,19 @@ def test_hybrid_config_does_not_fall_back_to_retain_all(tmp_path: Path) -> None:
         training=replace(_config().training, activation_policy="hybrid"),
     )
 
-    with pytest.raises(NotImplementedError):
-        run_bounded_training(
-            config,
-            bundle_store_path=tmp_path / "hybrid",
-            target_step=1,
-            device_override="cpu",
-        )
+    result = run_bounded_training(
+        config,
+        bundle_store_path=tmp_path / "hybrid",
+        target_step=1,
+        device_override="cpu",
+        activation_working_set_bytes=2048,
+        workspace_working_set_bytes=1024**2,
+    )
+
+    assert result.activation_policy == "hybrid"
+    assert result.steps[0].activation_policy == "hybrid"
+    assert result.maximum_retained_forward_boundary_bytes == 1024
+    assert result.total_prefix_replayed_groups == 1
+    assert result.final_bounded_vs_resident_state.exact_bytes
+    assert (tmp_path / "hybrid" / "HYBRID_ACTIVATION_PROFILE.json").is_file()
+    assert (tmp_path / "hybrid" / "HYBRID_ACTIVATION_PLAN.json").is_file()

@@ -41,13 +41,14 @@ Do not request another Mac execution before this phase passes.
 
 ## Phase 1. Reimplement M6C cleanly
 
-Status: **profile and planner implemented but not accepted**.
+Status: **runtime implemented on the M6C branch, not Apple M2 accepted**.
 
-The first clean M6C increment adds checksummed profile and plan generation,
-public APIs, a `microcolossus-activation-plan` CLI, a hybrid example config,
-and CPU tests. It does not yet integrate nearest-anchor backward execution,
-persistent root plan identity, resume, pruning, failure injection, or Apple M2
-validation.
+The clean M6C branch adds checksummed profile and plan generation, public APIs,
+a `microcolossus-activation-plan` CLI, micro/tiny/small hybrid example
+configs, persistent nearest-anchor backward execution, root plan identity,
+resume rejection for changed plans or budgets, pruning compatibility,
+publication-failure coverage, and CPU tests. It still requires normal CI and
+Apple M2 validation before M6C is accepted.
 
 Issue `#27` is the requirements document.
 
@@ -224,7 +225,7 @@ no temporary workflow or payload file
 
 ## Phase 2. M6C Apple M2 gate
 
-Status: **blocked by Phase 1**.
+Status: **blocked until Phase 1 has green local checks and normal CI**.
 
 Compare `retain_all`, `recompute`, and `hybrid` on:
 

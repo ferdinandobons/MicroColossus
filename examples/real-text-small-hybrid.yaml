@@ -1,0 +1,55 @@
+name: real-text-small-hybrid
+output_dir: runs/real-text-small-hybrid
+
+model:
+  vocab_size: 256
+  max_sequence_length: 128
+  layers: 4
+  heads: 4
+  hidden_size: 192
+  mlp_ratio: 4
+  dropout: 0.0
+  norm_epsilon: 0.00001
+  tie_embeddings: true
+
+training:
+  mode: reference
+  activation_policy: hybrid
+  activation_anchor_policy:
+    kind: measured_budget_v1
+    fixed_interval: 2
+  steps: 200
+  micro_batch_size: 1
+  sequence_length: 128
+  learning_rate: 0.0003
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  seed: 42
+  device: mps
+
+data:
+  kind: utf8_text
+  train_path: data/micro-corpus.txt
+  validation_fraction: 0.15
+  tokenizer: utf8-bytes-v1
+  sampler: random-window-v1
+
+evaluation:
+  enabled: true
+  interval_steps: 10
+  validation_batches: 4
+  sample_tokens: 64
+  sample_prompt: "The workshop "
+  generation: greedy-v1
+
+retention:
+  keep_previous: 2
+  milestone_interval: 5
+
+hardware:
+  accelerator_memory_gib: 5.0
+  process_ram_gib: 5.0
+  system_memory_gib: 8.0
+  nvme_gib: 20.0
+  ssd_write_budget_tb: 10.0
+  memory_architecture: unified

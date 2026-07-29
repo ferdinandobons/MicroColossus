@@ -14,6 +14,7 @@ from .activation_recompute import (
     ActivationWorkingSetExceededError,
     WorkspaceWorkingSetExceededError,
 )
+from .activation_planner import ActivationMeasurementProfile, ActivationPlan
 from .bounded_backward import _batch_checksum
 from .bounded_forward import build_execution_groups
 from .bounded_optimizer import (
@@ -34,6 +35,7 @@ from .bounded_training_types import PersistentStepResult
 from .config import ExperimentConfig
 from .model import DecoderOnlyTransformer
 from .persistent_backward import run_bounded_backward_from_store
+from .persistent_hybrid import run_activation_hybrid_from_store
 from .persistent_recompute import run_activation_recompute_from_store
 from .step_bundle import (
     BundleFailureInjector,
@@ -144,7 +146,9 @@ def advance_one_step(
     optimizer_working_set_bytes: int,
     activation_working_set_bytes: int,
     workspace_working_set_bytes: int,
-    bundle_failure_injector: BundleFailureInjector | None,
+    activation_profile: ActivationMeasurementProfile | None = None,
+    activation_plan: ActivationPlan | None = None,
+    bundle_failure_injector: BundleFailureInjector | None = None,
 ) -> PersistentStepResult:
     next_step = current.committed_step + 1
     if batch_cursor != current.committed_step:
@@ -196,6 +200,42 @@ def advance_one_step(
         resident_gradient_norm = recomputed.resident_gradient_norm
         bounded_gradient_norm = recomputed.recomputed_gradient_norm
         clipping_coefficient = recomputed.future_clip_coefficient
+    elif config.training.activation_policy == "hybrid":
+        if activation_profile is None or activation_plan is None:
+            raise RuntimeError("hybrid activation execution requires a profile and plan")
+        hybrid = run_activation_hybrid_from_store(
+            config,
+            parameter_store=parameter_store,
+            activation_profile=activation_profile,
+            activation_plan=activation_plan,
+            oracle_gradient_store_path=oracle_gradient_store_path,
+            gradient_store_path=gradient_store_path,
+            output_path=backward_result_path,
+            input_ids=input_ids,
+            targets=targets,
+            device=device,
+            parameter_working_set_bytes=parameter_working_set_bytes,
+            gradient_working_set_bytes=gradient_working_set_bytes,
+            activation_working_set_bytes=activation_working_set_bytes,
+            workspace_working_set_bytes=workspace_working_set_bytes,
+        )
+        maximum_parameter_group_bytes = hybrid.maximum_parameter_group_bytes
+        maximum_gradient_group_bytes = hybrid.maximum_gradient_group_bytes
+        parameter_budget_respected = hybrid.parameter_budget_respected
+        gradient_budget_respected = hybrid.gradient_budget_respected
+        maximum_retained_activation_bytes = hybrid.maximum_retained_activation_bytes
+        maximum_workspace_bytes = hybrid.maximum_workspace_bytes
+        retained_forward_boundary_count = hybrid.retained_forward_boundary_count
+        retained_forward_boundary_bytes = hybrid.retained_forward_boundary_bytes
+        total_prefix_replayed_groups = hybrid.total_prefix_replayed_groups
+        total_prefix_recomputation_seconds = hybrid.total_prefix_recomputation_seconds
+        activation_budget_respected = hybrid.activation_budget_respected
+        workspace_budget_respected = hybrid.workspace_budget_respected
+        backward_resident_loss = hybrid.resident_loss
+        bounded_loss = hybrid.recomputed_loss
+        resident_gradient_norm = hybrid.resident_gradient_norm
+        bounded_gradient_norm = hybrid.recomputed_gradient_norm
+        clipping_coefficient = hybrid.future_clip_coefficient
     elif config.training.activation_policy == "retain_all":
         retained = run_bounded_backward_from_store(
             config,

@@ -138,4 +138,4 @@ __all__ = [
     "write_activation_profile",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
