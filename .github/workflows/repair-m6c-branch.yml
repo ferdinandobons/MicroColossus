@@ -1,17 +1,16 @@
 name: Repair M6C branch
 
 on:
-  push:
+  pull_request:
     branches:
       - main
-    paths:
-      - .github/workflows/repair-m6c-branch.yml
 
 permissions:
   contents: write
 
 jobs:
   repair:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/m6c-hybrid-activation-planner'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
