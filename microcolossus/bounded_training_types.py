@@ -45,9 +45,10 @@ class PersistentStepResult:
     gradient_store_path: str
     candidate_parameter_store_path: str
     candidate_optimizer_store_path: str
-    oracle_state_store_path: str
+    oracle_state_store_path: str | None
     bounded_backward_result_path: str
     activation_policy: str
+    validation_level: str
     parameter_working_set_budget_bytes: int
     gradient_working_set_budget_bytes: int
     optimizer_working_set_budget_bytes: int
@@ -78,8 +79,8 @@ class PersistentStepResult:
     optimizer_groups: tuple[OptimizerGroupMetrics, ...]
     tied_parameter_update_count: int
     candidate_tensor_versions: tuple[tuple[str, int], ...]
-    resident_vs_candidate_state: StateComparison
-    candidate_vs_restored_state: StateComparison
+    resident_vs_candidate_state: StateComparison | None
+    candidate_vs_restored_state: StateComparison | None
     source_bundle_remained_authoritative_until_final_publish: bool
     final_bundle_is_authoritative: bool
     final_bundle_publication: BundlePublicationTelemetry
@@ -96,6 +97,7 @@ class PersistentStepResult:
     total_prefix_parameter_logical_bytes_read: int = field(init=False)
     full_candidate_state_materialized_for_validation: bool = True
     resident_oracle_materialized_for_validation: bool = True
+    validation_omitted_checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         tensor_reads, chunk_reads, logical_bytes = _prefix_replay_traffic(
@@ -122,6 +124,7 @@ class BoundedTrainingResult:
     initialized_bundle_id: str
     initialization_publication: BundlePublicationTelemetry | None
     activation_policy: str
+    validation_level: str
     activation_working_set_budget_bytes: int
     workspace_working_set_budget_bytes: int
     steps: tuple[PersistentStepResult, ...]
@@ -129,8 +132,8 @@ class BoundedTrainingResult:
     progress_records: tuple[TrainingProgressRecord, ...]
     metrics_directory: str
     final_bundle_verification: BundleVerificationReport
-    final_bounded_vs_resident_state: StateComparison
-    final_bundle_vs_restored_state: StateComparison
+    final_bounded_vs_resident_state: StateComparison | None
+    final_bundle_vs_restored_state: StateComparison | None
     final_batch_cursor: int
     optimizer_step_values: tuple[tuple[str, float], ...]
     maximum_retained_activation_bytes: int
@@ -152,6 +155,7 @@ class BoundedTrainingResult:
     full_final_state_materialized_for_validation: bool = True
     resident_reference_replayed_from_step_zero: bool = True
     historical_bundles_retained: bool = True
+    validation_omitted_checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
